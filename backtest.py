@@ -440,7 +440,7 @@ def compute_max_drawdown(equity_values: Iterable[float]) -> Optional[float]:
     return float(drawdowns.max()) if drawdowns.size else None
 
 
-def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
+def summarize_trades(trades_path: Path) -> Dict[str, Any]:
     empty_stats = {
         "total_trades": 0,
         "closed_trades": 0,
@@ -451,10 +451,13 @@ def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
         "breakeven_trades": 0,
         "win_rate_pct": None,
         "net_realized_pnl": 0.0,
-        "avg_win_pnl": None,
-        "avg_loss_pnl": None,
+        "gross_win": 0.0,
+        "gross_loss": 0.0,
         "profit_factor": None,
         "avg_trade_pnl": None,
+        "avg_holding_time_seconds": None,
+        "max_consecutive_wins": 0,
+        "max_consecutive_losses": 0,
     }
 
     if not trades_path.exists():
@@ -469,7 +472,71 @@ def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
     if df.empty or "action" not in df:
         return dict(empty_stats)
 
+    # Calculate holding time and consecutive streaks
+    holding_times = []
+    open_positions: Dict[str, List[Dict[str, Any]]] = {}
+    
+    # Sort by timestamp to ensure chronological processing
+    df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
+    df = df.sort_values("timestamp_dt")
+    
+    max_consecutive_wins = 0
+    max_consecutive_losses = 0
+    current_streak_type = None # 'win' or 'loss'
+    current_streak_count = 0
+
     actions = df["action"].astype(str).str.upper().str.strip()
+    
+    for _, row in df.iterrows():
+        coin = row["coin"]
+        action = str(row["action"]).upper()
+        ts = row["timestamp_dt"]
+        
+        if action == "ENTRY":
+            if coin not in open_positions:
+                open_positions[coin] = []
+            open_positions[coin].append({"ts": ts, "qty": float(row["quantity"])})
+        elif action in ["CLOSE", "CLOSE_PARTIAL"]:
+            close_qty = float(row["quantity"])
+            pnl = float(row["pnl"])
+            
+            # Match with entries (FIFO) to calculate holding time
+            if coin in open_positions:
+                while close_qty > 0 and open_positions[coin]:
+                    entry = open_positions[coin][0]
+                    if entry["qty"] <= close_qty + 1e-8:
+                        # Full entry closed
+                        duration = (ts - entry["ts"]).total_seconds()
+                        holding_times.append(duration)
+                        close_qty -= entry["qty"]
+                        open_positions[coin].pop(0)
+                    else:
+                        # Partial entry closed
+                        duration = (ts - entry["ts"]).total_seconds()
+                        holding_times.append(duration)
+                        entry["qty"] -= close_qty
+                        close_qty = 0
+            
+            # Streak calculation
+            if pnl > 0:
+                if current_streak_type == 'win':
+                    current_streak_count += 1
+                else:
+                    current_streak_type = 'win'
+                    current_streak_count = 1
+                max_consecutive_wins = max(max_consecutive_wins, current_streak_count)
+            elif pnl < 0:
+                if current_streak_type == 'loss':
+                    current_streak_count += 1
+                else:
+                    current_streak_type = 'loss'
+                    current_streak_count = 1
+                max_consecutive_losses = max(max_consecutive_losses, current_streak_count)
+            elif pnl == 0:
+                # Breakeven resets streak
+                current_streak_type = None
+                current_streak_count = 0
+
     entries_mask = actions == "ENTRY"
     closes_mask = actions == "CLOSE"
     partial_mask = actions == "CLOSE_PARTIAL"
@@ -501,11 +568,11 @@ def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
 
     wins = close_trades[close_trades["pnl"] > 0]["pnl"]
     losses = close_trades[close_trades["pnl"] < 0]["pnl"]
-    avg_win = float(wins.mean()) if not wins.empty else None
-    avg_loss = float(losses.mean()) if not losses.empty else None
     gross_profit = float(wins.sum()) if not wins.empty else 0.0
     gross_loss = float(-losses.sum()) if not losses.empty else 0.0
     profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
+    
+    avg_holding_time = float(np.mean(holding_times)) if holding_times else None
 
     return {
         "total_trades": total_trades,
@@ -517,10 +584,13 @@ def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
         "breakeven_trades": breakeven,
         "win_rate_pct": float(win_rate) if win_rate is not None else None,
         "net_realized_pnl": net_realized,
-        "avg_win_pnl": avg_win,
-        "avg_loss_pnl": avg_loss,
+        "gross_win": gross_profit,
+        "gross_loss": gross_loss,
         "profit_factor": profit_factor,
         "avg_trade_pnl": avg_trade,
+        "avg_holding_time_seconds": avg_holding_time,
+        "max_consecutive_wins": max_consecutive_wins,
+        "max_consecutive_losses": max_consecutive_losses,
     }
 
 
@@ -648,13 +718,13 @@ def main() -> None:
         should_call_ai = False
         event_reason = ""
         
-        # Reason A: We have active positions (Need management check every 2 days if no big moves)
+        # Reason A: We have active positions (Check every bar for management)
         has_positions = len(bot.positions) > 0
-        if has_positions and (idx % 2 == 0):
+        if has_positions:
             should_call_ai = True
             event_reason = "Active position management"
             
-        # Reason B: Significant Price Volatility (> 2% move in one day)
+        # Reason B: Moderate Price Volatility (> 0.8% move)
         for symbol in bot.SYMBOLS:
             klines = historical_client.get_klines(symbol, cfg.interval, limit=2)
             if len(klines) >= 2:
@@ -662,7 +732,10 @@ def main() -> None:
                 prev_close = float(klines[-2][4])
                 curr_close = float(klines[-1][4])
                 change = abs((curr_close - prev_close) / prev_close)
-                if change >= 0.02:
+                if change >= 0.008:
+                    should_call_ai = True
+                    event_reason = f"Volatility detected in {symbol} ({change*100:.1f}%)"
+                    break
                     should_call_ai = True
                     event_reason = f"Volatility detected in {symbol} ({change*100:.1f}%)"
                     break
@@ -714,10 +787,27 @@ def main() -> None:
             )
 
     final_equity = bot.calculate_total_equity()
-    total_return_pct = ((final_equity - bot.START_CAPITAL) / bot.START_CAPITAL) * 100 if bot.START_CAPITAL else 0.0
+    total_net_profit = final_equity - bot.START_CAPITAL
+    total_return_pct = (total_net_profit / bot.START_CAPITAL) * 100 if bot.START_CAPITAL else 0.0
     sortino = bot.calculate_sortino_ratio(bot.equity_history, interval_seconds, bot.RISK_FREE_RATE)
+    sharpe = bot.calculate_sharpe_ratio(bot.equity_history, interval_seconds, bot.RISK_FREE_RATE)
     max_drawdown = compute_max_drawdown(bot.equity_history)
     trade_stats = summarize_trades(bot.TRADES_CSV)
+
+    recovery_factor = None
+    if max_drawdown is not None and max_drawdown > 0:
+        # max_drawdown is decimal pct, e.g. 0.1 for 10%
+        # recovery_factor = Total Net Profit / (Start Capital * Max Drawdown)
+        max_dd_amount = bot.START_CAPITAL * max_drawdown
+        recovery_factor = total_net_profit / max_dd_amount if max_dd_amount > 0 else None
+
+    # Helper for duration formatting
+    def format_seconds(seconds: Optional[float]) -> str:
+        if seconds is None: return "N/A"
+        if seconds < 60: return f"{seconds:.1f}s"
+        if seconds < 3600: return f"{seconds/60:.1f}m"
+        if seconds < 86400: return f"{seconds/3600:.1f}h"
+        return f"{seconds/86400:.1f}d"
 
     results = {
         "run_id": cfg.run_id,
@@ -734,8 +824,11 @@ def main() -> None:
             "start": bot.START_CAPITAL,
             "final_balance": bot.balance,
             "final_equity": final_equity,
+            "total_net_profit": total_net_profit,
             "total_return_pct": total_return_pct,
             "max_drawdown_pct": (max_drawdown * 100) if max_drawdown is not None else None,
+            "recovery_factor": recovery_factor,
+            "sharpe_ratio": sharpe,
             "sortino_ratio": sortino,
         },
         "llm": {
@@ -771,12 +864,15 @@ def main() -> None:
             msg = (
                 f"📊 *Backtest Complete*\n\n"
                 f"🚀 *Model:* `{bot.LLM_MODEL_NAME}`\n"
-                f"📈 *Total Return:* `{total_return_pct:.2f}%`\n"
+                f"💰 *Total Net Profit:* `${total_net_profit:.2f}` ({total_return_pct:.2f}%)\n"
+                f"📈 *Profit Factor:* `{trade_stats['profit_factor'] if trade_stats['profit_factor'] is not None else 0:.2f}`\n"
                 f"📉 *Max Drawdown:* `{(max_drawdown * 100) if max_drawdown is not None else 0:.2f}%`\n"
-                f"🛡️ *Sortino Ratio:* `{sortino if sortino is not None else 0:.2f}`\n\n"
-                f"💼 *Final Equity:* `${final_equity:.2f}`\n"
-                f"🔄 *Total Trades:* `{trade_stats['total_trades']}`\n"
+                f"🛡️ *Recovery Factor:* `{recovery_factor if recovery_factor is not None else 0:.2f}`\n"
+                f"📊 *Sharpe Ratio:* `{sharpe if sharpe is not None else 0:.2f}`\n\n"
                 f"✅ *Win Rate:* `{trade_stats['win_rate_pct'] if trade_stats['win_rate_pct'] is not None else 0:.1f}%`\n"
+                f"⏱️ *Avg Hold Time:* `{format_seconds(trade_stats['avg_holding_time_seconds'])}`\n"
+                f"🔥 *Consecutive W/L:* `{trade_stats['max_consecutive_wins']}/{trade_stats['max_consecutive_losses']}`\n"
+                f"🔄 *Total Trades:* `{trade_stats['total_trades']}`\n"
             )
             bot.send_telegram_message(msg)
             logging.info("Sent backtest summary to Telegram.")

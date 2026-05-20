@@ -150,50 +150,18 @@ SYMBOL_TO_COIN = {
 COIN_TO_SYMBOL = {coin: symbol for symbol, coin in SYMBOL_TO_COIN.items()}
 
 DEFAULT_TRADING_RULES_PROMPT = """
-You are a top level crypto trader focused on multiplying the account while safeguarding capital. Always apply these core rules:
+You are a high-performance aggressive crypto trader. Your goal is to maximize account growth by decisively entering high-probability setups.
 
-Most Important Rules for Crypto Traders
+CORE DIRECTIVES:
+- Be Decisive: One clear signal is enough to act.
+- Lower Barriers: 3/6 secondary conditions are sufficient.
+- Risk Profile: Accept R/R as low as 1.2:1.
+- Trend Following: Ride strong trends with conviction.
 
-Capital preservation is the foundation of successful crypto trading—your primary goal is to protect what you have so you can continue trading and growing.
-
-Never Risk More Than 1-2% Per Trade
-- Treat the 1% rule as non-negotiable; never risk more than 1-2% of total capital on a single trade.
-- Survive losing streaks with enough capital to recover.
-
-Use Stop-Loss Orders on Every Trade
-- Define exit points before entering any position.
-- Stop-loss orders are mandatory safeguards against emotional decisions.
-
-Follow the Trend—Don't Fight the Market
-- Buy rising coins and sell falling ones; the market is always right.
-- Wait for confirmation before committing capital.
-
-Stay Inactive Most of the Time
-- Trade only when high-probability setups emerge.
-- Avoid overtrading; patience and discipline preserve capital.
-
-Cut Losses Quickly and Let Profits Run
-- Close losing trades decisively; exit weak performers without hesitation.
-- Let winning trades develop and grow when they show early profit.
-
-Maintain a Written Trading Plan
-- Know entry, exit, and profit targets before executing.
-- Consistently follow the plan to keep emotions in check.
-
-Control Leverage and Position Sizing
-- Use leverage responsibly; ensure even a worst-case loss stays within the 1-2% risk cap.
-- Proper sizing is central to risk management.
-
-Focus on Small Consistent Wins
-- Prioritize steady gains over chasing moonshots.
-- Incremental growth compounds reliably and is easier to manage.
-
-Think in Probabilities, Not Predictions
-- Treat trading like a probability game with positive expectancy over many trades.
-- Shift mindset from needing to be right to managing outcomes.
-
-Stay Informed but Trade Less
-- Track market-moving news but trade only when indicators align and risk-reward is favorable.
+EXECUTION RULES:
+- Risk: Default to 5% of capital per trade.
+- Leverage: Default to 10x.
+- Surival is priority, but growth is the mission.
 """.strip()
 
 SYSTEM_PROMPT_SOURCE: Dict[str, Any] = {"type": "default"}
@@ -586,40 +554,6 @@ def log_trade(coin: str, action: str, details: Dict[str, Any]) -> None:
             balance,
             details.get('reason', '')
         ])
-
-def get_recent_trades_feedback(limit: int = 5) -> str:
-    """Retrieve and format the last few closed trades for AI feedback loop."""
-    if not TRADES_CSV.exists():
-        return "No trade history available yet."
-    
-    try:
-        df = pd.read_csv(TRADES_CSV)
-        if df.empty:
-            return "No trade history available yet."
-        
-        # Filter for closed trades (CLOSE or CLOSE_PARTIAL)
-        # We look for rows where action is 'CLOSE' or 'CLOSE_PARTIAL'
-        closed_trades = df[df['action'].str.contains('CLOSE', case=False, na=False)].tail(limit)
-        
-        if closed_trades.empty:
-            return "No recently closed trades to learn from."
-        
-        feedback_lines = []
-        for _, row in closed_trades.iterrows():
-            try:
-                pnl_val = float(row['pnl'])
-            except (ValueError, TypeError):
-                pnl_val = 0.0
-            status = "WIN" if pnl_val > 0 else "LOSS" if pnl_val < 0 else "BREAKEVEN"
-            coin = row['coin']
-            side = str(row['side']).upper()
-            reason = row.get('reason', 'No reason provided')
-            feedback_lines.append(f"- [{status}] {side} {coin}: PnL=${pnl_val:.2f}. Reason: {reason}")
-            
-        return "\n".join(feedback_lines)
-    except Exception as e:
-        logging.error(f"Error reading trade history for feedback loop: {e}")
-        return "Error retrieving trade history."
 
 def log_ai_decision(coin: str, signal: str, reasoning: str, confidence: float) -> None:
     """Log AI decision."""
@@ -1542,13 +1476,37 @@ def format_trading_prompt() -> str:
         prompt_lines.append(
             f"    Funding Rate: Latest={fmt_rate(data['funding_rate'])}, Average={funding_avg_str}"
         )
+        # Build trade history section (Feedback Loop)
+        if TRADES_CSV.exists():
+            try:
+                trades_df = pd.read_csv(TRADES_CSV)
+                if not trades_df.empty:
+                    # Get last 10 close/partial close events
+                    recent_outcomes = trades_df[trades_df["action"].isin(["CLOSE", "CLOSE_PARTIAL"])].tail(10)
+                    if not recent_outcomes.empty:
+                        prompt_lines.append("-" * 80)
+                        prompt_lines.append("RECENT TRADE OUTCOMES (Feedback Loop - Learn from these!)")
+                        for _, row in recent_outcomes.iterrows():
+                            pnl_val = float(row.get("pnl", 0.0))
+                            outcome = "[WIN]" if pnl_val > 0 else "[LOSS]" if pnl_val < 0 else "[BREAKEVEN]"
+                            coin_val = row.get("coin", "N/A")
+                            side_val = row.get("side", "N/A")
+                            reason_val = row.get("reason", "N/A")
+                            prompt_lines.append(f"{outcome} {coin_val} {side_val} | PnL: ${pnl_val:.2f} | Reason: {reason_val}")
+
+                        # Calculate recent win rate
+                        wins = (recent_outcomes["pnl"] > 0).sum()
+                        total_recent = len(recent_outcomes)
+                        recent_wr = (wins / total_recent) * 100
+                        prompt_lines.append(f"Recent Win Rate (last {total_recent}): {recent_wr:.1f}%")
+                        if recent_wr < 40:
+                            prompt_lines.append("NOTICE: You are currently in a losing streak. The market may be volatile or your current strategy is being exploited. Consider being more selective (REJECT more) or widening stops.")
+            except Exception as exc:
+                logging.debug("Failed to read trade history for prompt: %s", exc)
+
         prompt_lines.append("-" * 80)
+        prompt_lines.append("ACCOUNT INFORMATION AND PERFORMANCE")
 
-    prompt_lines.append("RECENT TRADE HISTORY (FEEDBACK LOOP)")
-    prompt_lines.append(get_recent_trades_feedback(limit=5))
-    prompt_lines.append("-" * 80)
-
-    prompt_lines.append("ACCOUNT INFORMATION AND PERFORMANCE")
     prompt_lines.append(f"- Total Return (%): {fmt(total_return, 2)}")
     prompt_lines.append(f"- Available Cash: {fmt(balance, 2)}")
     prompt_lines.append(f"- Margin Allocated: {fmt(total_margin, 2)}")
@@ -2035,6 +1993,41 @@ def calculate_sortino_ratio(
         return None
     return float(sortino)
 
+def calculate_sharpe_ratio(
+    equity_values: Iterable[float],
+    period_seconds: float,
+    risk_free_rate: float = DEFAULT_RISK_FREE_RATE,
+) -> Optional[float]:
+    """
+    Compute the annualized Sharpe ratio from equity snapshots.
+    """
+    values = [float(v) for v in equity_values if isinstance(v, (int, float, np.floating)) and np.isfinite(v)]
+    if len(values) < 2:
+        return None
+
+    returns = np.diff(values) / np.array(values[:-1], dtype=float)
+    returns = returns[np.isfinite(returns)]
+    if returns.size == 0:
+        return None
+
+    period_seconds = float(period_seconds) if period_seconds and period_seconds > 0 else CHECK_INTERVAL
+    periods_per_year = (365 * 24 * 60 * 60) / period_seconds
+    if not np.isfinite(periods_per_year) or periods_per_year <= 0:
+        return None
+
+    per_period_rf = risk_free_rate / periods_per_year
+    excess_returns = returns - per_period_rf
+    mean_excess_return = excess_returns.mean()
+    std_return = returns.std()
+    
+    if std_return <= 0 or not np.isfinite(std_return):
+        return None
+
+    sharpe = (mean_excess_return / std_return) * np.sqrt(periods_per_year)
+    if not np.isfinite(sharpe):
+        return None
+    return float(sharpe)
+
 def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> None:
     """Execute entry trade."""
     global balance
@@ -2074,7 +2067,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         leverage = 1.0
     leverage_display = format_leverage_display(leverage)
 
-    risk_usd_raw = decision.get('risk_usd', balance * 0.01)
+    risk_usd_raw = decision.get('risk_usd', balance * 0.05)
     try:
         risk_usd = float(risk_usd_raw)
     except (TypeError, ValueError):
