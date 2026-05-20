@@ -546,8 +546,8 @@ def render_ai_tab(decisions_df: pd.DataFrame, messages_df: pd.DataFrame) -> None
 
 
 def main() -> None:
-    st.set_page_config(page_title="DeepSeek Bot Monitor", layout="wide")
-    st.title("DeepSeek Trading Bot Monitor")
+    st.set_page_config(page_title="AI Bot Monitor", layout="wide")
+    st.title("AI Trading Bot Monitor")
     st.caption(
         "Source code available at "
         "[github.com/kojott/LLM-trader-test](https://github.com/kojott/LLM-trader-test)"

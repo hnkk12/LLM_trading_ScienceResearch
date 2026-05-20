@@ -683,8 +683,8 @@ def main() -> None:
 
         if should_call_ai:
             logging.info("Waking up AI for: %s", event_reason)
-            prompt = bot.format_prompt_for_deepseek()
-            decisions = bot.call_deepseek_api(prompt)
+            prompt = bot.format_trading_prompt()
+            decisions = bot.call_llm_api(prompt)
             ai_calls_count += 1
 
             if not decisions:
@@ -698,7 +698,7 @@ def main() -> None:
 
         total_equity = bot.calculate_total_equity()
         bot.register_equity_snapshot(total_equity)
-        # bot.log_portfolio_state() # Reduced logging for speed
+        bot.log_portfolio_state() # Reduced logging for speed
         bot.save_state()
 
         current_dt = simulated_time()

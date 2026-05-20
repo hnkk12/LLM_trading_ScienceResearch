@@ -106,9 +106,18 @@ def _parse_thinking_env(value: Optional[str]) -> Optional[Any]:
 API_KEY = os.getenv("BN_API_KEY", "")
 API_SECRET = os.getenv("BN_SECRET", "")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "")
 TELEGRAM_SIGNALS_CHAT_ID = os.getenv("TELEGRAM_SIGNALS_CHAT_ID", "")
+
+# Proxy configuration
+HTTP_PROXY = os.getenv("HTTP_PROXY")
+HTTPS_PROXY = os.getenv("HTTPS_PROXY")
+PROXIES = {
+    "http": HTTP_PROXY,
+    "https": HTTPS_PROXY,
+} if HTTP_PROXY or HTTPS_PROXY else None
 
 HYPERLIQUID_LIVE_TRADING = _parse_bool_env(
     os.getenv("HYPERLIQUID_LIVE_TRADING"),
@@ -264,7 +273,7 @@ def _load_trade_interval(default: str = DEFAULT_INTERVAL) -> str:
 INTERVAL = _load_trade_interval()
 CHECK_INTERVAL = _INTERVAL_TO_SECONDS[INTERVAL]
 DEFAULT_RISK_FREE_RATE = 0.0  # Annualized baseline for Sortino ratio calculations
-DEFAULT_LLM_MODEL = "deepseek/deepseek-chat-v3.1"
+DEFAULT_LLM_MODEL = "llama-3.1-8b-instant"
 
 
 def _load_llm_model_name() -> str:
@@ -1279,8 +1288,8 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
 
 # ───────────────────── AI DECISION MAKING ───────────────────
 
-def format_prompt_for_deepseek() -> str:
-    """Compose a rich prompt resembling the original DeepSeek in-context format."""
+def format_trading_prompt() -> str:
+    """Compose a rich prompt for the trading agent."""
     global invocation_count
     invocation_count += 1
 
@@ -1340,8 +1349,6 @@ def format_prompt_for_deepseek() -> str:
     is_daily_only = (INTERVAL == "1d")
     
     for symbol in SYMBOLS:
-        coin = SYMBOL_TO_COIN[coin_entry] if 'coin_entry' in locals() else SYMBOL_TO_COIN.get(symbol, symbol)
-        # Fix: ensure we use the correct coin name from market_snapshots
         coin = SYMBOL_TO_COIN.get(symbol, symbol)
         data = market_snapshots.get(coin)
         if not data:
@@ -1574,9 +1581,6 @@ def format_prompt_for_deepseek() -> str:
         }
         prompt_lines.append(f"{coin} position data: {json.dumps(position_payload)}")
 
-    sharpe_ratio = 0.0
-    prompt_lines.append(f"Sharpe Ratio: {fmt(sharpe_ratio, 3)}")
-
     prompt_lines.append(
         """
 INSTRUCTIONS:
@@ -1603,6 +1607,10 @@ Do not include commentary outside the JSON response.
     )
 
     return "\n".join(prompt_lines)
+
+def format_prompt_for_deepseek() -> str:
+    """Deprecated: use format_trading_prompt instead."""
+    return format_trading_prompt()
 
 def _recover_partial_decisions(json_str: str) -> Optional[Tuple[Dict[str, Any], List[str]]]:
     """Attempt to salvage individual coin decisions from truncated JSON."""
@@ -1674,17 +1682,33 @@ def _recover_partial_decisions(json_str: str) -> Optional[Tuple[Dict[str, Any], 
 
     return recovered, missing
 
+def call_llm_api(prompt: str) -> Optional[Dict[str, Any]]:
+    """Call the configured LLM API (Google Gemini direct or OpenRouter)."""
+    # Detect provider and call appropriate helper
+    is_gemini_model = "gemini" in LLM_MODEL_NAME.lower()
+    
+    if is_gemini_model and GEMINI_API_KEY:
+        return _call_google_gemini_api(prompt)
+    else:
+        return _call_openrouter_api(prompt)
 
-def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
-    """Call OpenRouter API with DeepSeek Chat V3.1."""
+def _call_google_gemini_api(prompt: str) -> Optional[Dict[str, Any]]:
+    """Call Google AI Studio API directly for Gemini models."""
     try:
-        request_metadata: Dict[str, Any] = {
-            "model": LLM_MODEL_NAME,
+        # Standardize model name for Google API
+        model_name = LLM_MODEL_NAME
+        if "/" in model_name:
+            model_name = model_name.split("/")[-1]
+            if not model_name.startswith("gemini-"):
+                model_name = f"gemini-{model_name}"
+
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        
+        request_metadata = {
+            "model": model_name,
             "temperature": LLM_TEMPERATURE,
-            "max_tokens": LLM_MAX_TOKENS,
+            "max_output_tokens": LLM_MAX_TOKENS,
         }
-        if LLM_THINKING_PARAM is not None:
-            request_metadata["thinking"] = LLM_THINKING_PARAM
 
         log_ai_message(
             direction="sent",
@@ -1699,23 +1723,74 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
             metadata=request_metadata,
         )
 
+        payload = {
+            "contents": [
+                {
+                    "role": "user",
+                    "parts": [{"text": f"SYSTEM RULES:\n{TRADING_RULES_PROMPT}\n\nUSER PROMPT:\n{prompt}"}]
+                }
+            ],
+            "generationConfig": {
+                "temperature": LLM_TEMPERATURE,
+                "maxOutputTokens": LLM_MAX_TOKENS,
+            }
+        }
+
+        response = requests.post(url, json=payload, timeout=30)
+        
+        if response.status_code != 200:
+            notify_error(
+                f"Google Gemini API error: {response.status_code}",
+                metadata={
+                    "status_code": response.status_code,
+                    "response_text": response.text,
+                },
+            )
+            return None
+
+        result = response.json()
+        candidates = result.get("candidates")
+        if not candidates:
+            notify_error("Google Gemini API returned no candidates", metadata=result)
+            return None
+
+        content = candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
+        return _extract_json_from_llm_response(content, response.status_code, result.get("usageMetadata"))
+
+    except Exception as e:
+        logging.exception("Error calling Google Gemini API")
+        notify_error(f"Error calling Google Gemini API: {e}")
+        return None
+
+def _call_openrouter_api(prompt: str) -> Optional[Dict[str, Any]]:
+    """Call OpenRouter API with robust parameter handling."""
+    try:
         request_payload: Dict[str, Any] = {
             "model": LLM_MODEL_NAME,
             "messages": [
-                {
-                    "role": "system",
-                    "content": TRADING_RULES_PROMPT
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
+                {"role": "system", "content": TRADING_RULES_PROMPT},
+                {"role": "user", "content": prompt}
             ],
             "temperature": LLM_TEMPERATURE,
             "max_tokens": LLM_MAX_TOKENS
         }
+
+        # Only add 'thinking' if explicitly configured and model supports it (usually DeepSeek)
         if LLM_THINKING_PARAM is not None:
             request_payload["thinking"] = LLM_THINKING_PARAM
+
+        log_ai_message(
+            direction="sent",
+            role="system",
+            content=TRADING_RULES_PROMPT,
+            metadata=request_payload,
+        )
+        log_ai_message(
+            direction="sent",
+            role="user",
+            content=prompt,
+            metadata=request_payload,
+        )
 
         response = requests.post(
             url="https://openrouter.ai/api/v1/chat/completions",
@@ -1723,7 +1798,7 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json",
                 "HTTP-Referer": "https://github.com/crypto-trading-bot",
-                "X-Title": "DeepSeek Trading Bot",
+                "X-Title": "AI Trading Bot",
             },
             json=request_payload,
             timeout=30
@@ -1735,6 +1810,7 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
                 metadata={
                     "status_code": response.status_code,
                     "response_text": response.text,
+                    "model": LLM_MODEL_NAME,
                 },
             )
             return None
@@ -1742,99 +1818,53 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
         result = response.json()
         choices = result.get("choices")
         if not choices:
-            notify_error(
-                "DeepSeek API returned no choices",
-                metadata={
-                    "status_code": response.status_code,
-                    "response_text": response.text[:500],
-                },
-            )
+            notify_error("OpenRouter API returned no choices", metadata=result)
             return None
 
-        primary_choice = choices[0]
-        message = primary_choice.get("message") or {}
-        content = message.get("content", "") or ""
-        finish_reason = primary_choice.get("finish_reason")
+        content = choices[0].get("message", {}).get("content", "")
+        return _extract_json_from_llm_response(content, response.status_code, result.get("usage"), result.get("id"))
 
-        log_ai_message(
-            direction="received",
-            role="assistant",
-            content=content,
-            metadata={
-                "status_code": response.status_code,
-                "response_id": result.get("id"),
-                "usage": result.get("usage"),
-                "finish_reason": finish_reason,
-            }
-        )
-
-        # Extract JSON from response (in case there's extra text)
-        start = content.find('{')
-        end = content.rfind('}') + 1
-        if start != -1 and end > start:
-            json_str = content[start:end]
-            try:
-                decisions = json.loads(json_str)
-                return decisions
-            except json.JSONDecodeError as decode_err:
-                recovery = _recover_partial_decisions(json_str)
-                if recovery:
-                    decisions, missing_coins = recovery
-                    if missing_coins:
-                        notification_message = (
-                            "DeepSeek response truncated; defaulted to hold for missing coins"
-                        )
-                    else:
-                        notification_message = (
-                            "DeepSeek response malformed; recovered all coin decisions"
-                        )
-                    logging.warning(
-                        "Recovered DeepSeek response after JSON error (missing coins: %s)",
-                        ", ".join(missing_coins) or "none",
-                    )
-                    notify_error(
-                        notification_message,
-                        metadata={
-                            "response_id": result.get("id"),
-                            "status_code": response.status_code,
-                            "missing_coins": missing_coins,
-                            "finish_reason": finish_reason,
-                            "raw_json_excerpt": json_str[:2000],
-                            "decode_error": str(decode_err),
-                        },
-                        log_error=False,
-                    )
-                    return decisions
-                snippet = json_str[:2000]
-                notify_error(
-                    f"DeepSeek JSON decode failed: {decode_err}",
-                    metadata={
-                        "response_id": result.get("id"),
-                        "status_code": response.status_code,
-                        "finish_reason": finish_reason,
-                        "raw_json_excerpt": snippet,
-                    },
-                )
-                return None
-        else:
-            notify_error(
-                "No JSON found in DeepSeek response",
-                metadata={
-                    "response_id": result.get("id"),
-                    "status_code": response.status_code,
-                    "finish_reason": finish_reason,
-                },
-            )
-            return None
-            
     except Exception as e:
-        logging.exception("Error calling DeepSeek API")
-        notify_error(
-            f"Error calling DeepSeek API: {e}",
-            metadata={"context": "call_deepseek_api"},
-            log_error=False,
-        )
+        logging.exception("Error calling OpenRouter API")
+        notify_error(f"Error calling OpenRouter API: {e}")
         return None
+
+def _extract_json_from_llm_response(content: str, status_code: int, usage: Any = None, response_id: str = "") -> Optional[Dict[str, Any]]:
+    """Sanitize and extract JSON from LLM response text."""
+    log_ai_message(
+        direction="received",
+        role="assistant",
+        content=content,
+        metadata={
+            "status_code": status_code,
+            "response_id": response_id,
+            "usage": usage,
+        }
+    )
+
+    # Extract JSON from response (handle markdown blocks or extra text)
+    start = content.find('{')
+    end = content.rfind('}') + 1
+    if start != -1 and end > start:
+        json_str = content[start:end]
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as decode_err:
+            recovery = _recover_partial_decisions(json_str)
+            if recovery:
+                decisions, missing_coins = recovery
+                logging.warning("Recovered partial JSON (missing: %s)", ", ".join(missing_coins))
+                return decisions
+            
+            notify_error(f"JSON decode failed: {decode_err}", metadata={"raw_excerpt": json_str[:500]})
+            return None
+    else:
+        notify_error("No JSON found in LLM response", metadata={"content_preview": content[:500]})
+        return None
+
+def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
+    """Deprecated: use call_llm_api instead."""
+    return call_llm_api(prompt)
 
 # ───────────────────── POSITION MANAGEMENT ──────────────────
 
@@ -2861,13 +2891,13 @@ def check_stop_loss_take_profit() -> None:
 def main() -> None:
     """Main trading loop."""
     global current_iteration_messages, iteration_counter
-    logging.info("Initializing DeepSeek Multi-Asset Paper Trading Bot...")
+    logging.info("Initializing AI Multi-Asset Paper Trading Bot...")
     init_csv_files()
     load_equity_history()
     load_state()
     
-    if not OPENROUTER_API_KEY:
-        logging.error("OPENROUTER_API_KEY not found in .env file")
+    if not OPENROUTER_API_KEY and not GEMINI_API_KEY:
+        logging.error("No LLM API key found (OPENROUTER_API_KEY or GEMINI_API_KEY). Please check your .env file.")
         return
     
     logging.info(f"Starting capital: ${START_CAPITAL:.2f}")
@@ -2915,9 +2945,9 @@ def main() -> None:
             check_stop_loss_take_profit()
             
             # Get AI decisions
-            logging.info("Requesting trading decisions from DeepSeek...")
-            prompt = format_prompt_for_deepseek()
-            decisions = call_deepseek_api(prompt)
+            logging.info("Requesting trading decisions from AI (%s)...", LLM_MODEL_NAME)
+            prompt = format_trading_prompt()
+            decisions = call_llm_api(prompt)
             
             if not decisions:
                 logging.warning("No decisions received from AI")
