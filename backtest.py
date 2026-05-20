@@ -63,6 +63,7 @@ WARMUP_BARS = {
     "15m": 200,
     "30m": 180,
     "1h": 150,
+    "1d": 100,
     LONG_CONTEXT_INTERVAL: 120,
 }
 
@@ -308,6 +309,78 @@ def ensure_cached_klines(
     return trimmed
 
 
+def parse_dataset_volume(vol_str: str) -> float:
+    """Parse volume strings like '1.08B', '842.07M', etc."""
+    if not isinstance(vol_str, str):
+        return 0.0
+    vol_str = vol_str.strip().upper()
+    if vol_str == "-" or not vol_str:
+        return 0.0
+    
+    multiplier = 1.0
+    if vol_str.endswith("B"):
+        multiplier = 1e9
+        vol_str = vol_str[:-1]
+    elif vol_str.endswith("M"):
+        multiplier = 1e6
+        vol_str = vol_str[:-1]
+    elif vol_str.endswith("K"):
+        multiplier = 1e3
+        vol_str = vol_str[:-1]
+    
+    try:
+        return float(vol_str.replace(",", "")) * multiplier
+    except ValueError:
+        return 0.0
+
+
+def load_from_dataset(symbol: str, cfg: BacktestConfig) -> pd.DataFrame:
+    """Load and normalize data from the local 'dataset' folder."""
+    dataset_dir = PROJECT_ROOT / "dataset"
+    # Find files starting with symbol (e.g., AAPL_D_2008_2009.csv)
+    files = list(dataset_dir.glob(f"{symbol}*.csv"))
+    if not files:
+        logging.warning("No local dataset found for %s in %s", symbol, dataset_dir)
+        return pd.DataFrame(columns=KLINE_COLUMNS)
+    
+    file_path = files[0] # Use the first match
+    logging.info("Loading local dataset for %s: %s", symbol, file_path)
+    
+    try:
+        df = pd.read_csv(file_path)
+        # Expected columns: "Date","Price","Open","High","Low","Vol.","Change %"
+        # Map to Binance format
+        normalized = pd.DataFrame()
+        # Some CSVs might use different case for Date
+        date_col = next((c for c in df.columns if c.lower() == "date"), "Date")
+        normalized["timestamp"] = pd.to_datetime(df[date_col]).astype(np.int64) // 10**6
+        
+        price_col = next((c for c in df.columns if c.lower() in ["price", "close"]), "Price")
+        open_col = next((c for c in df.columns if c.lower() == "open"), "Open")
+        high_col = next((c for c in df.columns if c.lower() == "high"), "High")
+        low_col = next((c for c in df.columns if c.lower() == "low"), "Low")
+        vol_col = next((c for c in df.columns if c.lower() in ["vol.", "volume"]), "Vol.")
+        
+        normalized["open"] = pd.to_numeric(df[open_col], errors="coerce")
+        normalized["high"] = pd.to_numeric(df[high_col], errors="coerce")
+        normalized["low"] = pd.to_numeric(df[low_col], errors="coerce")
+        normalized["close"] = pd.to_numeric(df[price_col], errors="coerce")
+        normalized["volume"] = df[vol_col].apply(parse_dataset_volume)
+        
+        # Add required kline columns
+        normalized["close_time"] = normalized["timestamp"] + 86399999 # Default to 1 day
+        normalized["quote_volume"] = 0.0
+        normalized["trades"] = 0
+        normalized["taker_base"] = 0.0
+        normalized["taker_quote"] = 0.0
+        normalized["ignore"] = 0
+        
+        return normalize_kline_dataframe(normalized)
+    except Exception as exc:
+        logging.error("Failed to load dataset %s: %s", file_path, exc)
+        return pd.DataFrame(columns=KLINE_COLUMNS)
+
+
 class HistoricalBinanceClient:
     """Minimal Binance client shim that replays cached klines."""
 
@@ -489,6 +562,17 @@ def main() -> None:
     configure_environment(cfg)
 
     import bot  # pylint: disable=import-error
+    
+    # Override symbols if provided in environment
+    env_symbols = os.getenv("BACKTEST_SYMBOLS")
+    if env_symbols:
+        requested_symbols = [s.strip().upper() for s in env_symbols.split(",") if s.strip()]
+        if requested_symbols:
+            bot.SYMBOLS = requested_symbols
+            # Also update SYMBOL_TO_COIN to avoid KeyErrors
+            bot.SYMBOL_TO_COIN = {s: s for s in requested_symbols}
+            bot.COIN_TO_SYMBOL = {s: s for s in requested_symbols}
+            logging.info("Overriding bot symbols with: %s", bot.SYMBOLS)
     if hasattr(bot, "refresh_llm_configuration_from_env"):
         bot.refresh_llm_configuration_from_env()
     if hasattr(bot, "log_system_prompt_info"):
@@ -508,29 +592,31 @@ def main() -> None:
         logging.warning("Hyperliquid trader reports live mode; forcing paper mode for backtest.")
         bot.hyperliquid_trader._requested_live = False  # type: ignore[attr-defined]
 
-    api_key = os.getenv("BN_API_KEY") or None
-    api_secret = os.getenv("BN_SECRET") or None
-    binance_client = Client(api_key, api_secret, testnet=False)
-
+    # Use local dataset instead of Binance API
     intervals_needed = {cfg.interval, STRUCTURE_INTERVAL, LONG_CONTEXT_INTERVAL}
     symbol_frames: Dict[str, Dict[str, pd.DataFrame]] = {}
     for symbol in bot.SYMBOLS:
         symbol_frames[symbol] = {}
+        # Load local data once per symbol and reuse for all intervals
+        local_frame = load_from_dataset(symbol, cfg)
         for interval in intervals_needed:
-            frame = ensure_cached_klines(binance_client, cfg, symbol, interval)
-            symbol_frames[symbol][interval] = frame
+            symbol_frames[symbol][interval] = local_frame
 
     historical_client = HistoricalBinanceClient(symbol_frames)
     bot.client = historical_client  # type: ignore[assignment]
 
     primary_symbol = bot.SYMBOLS[0]
+    if primary_symbol not in symbol_frames or symbol_frames[primary_symbol][cfg.interval].empty:
+        logging.error("No data found for primary symbol %s in dataset folder", primary_symbol)
+        return
+
     primary_interval_frame = symbol_frames[primary_symbol][cfg.interval]
     timeline_mask = (primary_interval_frame["timestamp"] >= cfg.start_ms) & (
         primary_interval_frame["timestamp"] <= cfg.end_ms
     )
     timeline = primary_interval_frame.loc[timeline_mask, "timestamp"].astype(np.int64).tolist()
     if not timeline:
-        logging.error("No data available for %s between %s and %s", cfg.interval, cfg.start, cfg.end)
+        logging.error("No data available for %s between %s and %s in local dataset", cfg.interval, cfg.start, cfg.end)
         return
 
     time_holder = {"value": int(timeline[0])}
@@ -548,35 +634,84 @@ def main() -> None:
     logging.info("LLM model used for this backtest: %s", bot.LLM_MODEL_NAME)
     print(f"LLM model used for this backtest: {bot.LLM_MODEL_NAME}")
 
+    ai_calls_count = 0
     for idx, timestamp_ms in enumerate(timeline, start=1):
         time_holder["value"] = int(timestamp_ms)
         historical_client.set_current_timestamp(int(timestamp_ms))
         bot.iteration_counter += 1
         bot.current_iteration_messages = []
 
+        # 1. Check Auto-Execution (TP/SL) - No API cost
         bot.check_stop_loss_take_profit()
-        prompt = bot.format_prompt_for_deepseek()
-        decisions = bot.call_deepseek_api(prompt)
+        
+        # 2. Event-Driven Logic: Decide if we should wake up the AI
+        should_call_ai = False
+        event_reason = ""
+        
+        # Reason A: We have active positions (Need management check every 2 days if no big moves)
+        has_positions = len(bot.positions) > 0
+        if has_positions and (idx % 2 == 0):
+            should_call_ai = True
+            event_reason = "Active position management"
+            
+        # Reason B: Significant Price Volatility (> 2% move in one day)
+        for symbol in bot.SYMBOLS:
+            klines = historical_client.get_klines(symbol, cfg.interval, limit=2)
+            if len(klines) >= 2:
+                # klines is List[List[float]], index 4 is 'close'
+                prev_close = float(klines[-2][4])
+                curr_close = float(klines[-1][4])
+                change = abs((curr_close - prev_close) / prev_close)
+                if change >= 0.02:
+                    should_call_ai = True
+                    event_reason = f"Volatility detected in {symbol} ({change*100:.1f}%)"
+                    break
+        
+        # Reason C: RSI Extremes (Potential reversals)
+        if not should_call_ai:
+            for symbol in bot.SYMBOLS:
+                data = bot.fetch_market_data(symbol)
+                if data and (data["rsi"] < 35 or data["rsi"] > 65):
+                    should_call_ai = True
+                    event_reason = f"RSI extreme in {symbol} ({data['rsi']:.1f})"
+                    break
+        
+        # Reason D: First and Last days (Always call for initial setup and final wrap)
+        if idx == 1 or idx == len(timeline):
+            should_call_ai = True
+            event_reason = "Initial/Final iteration"
 
-        if not decisions:
-            logging.warning("Iteration %d: no decisions returned by LLM.", idx)
+        if should_call_ai:
+            logging.info("Waking up AI for: %s", event_reason)
+            prompt = bot.format_prompt_for_deepseek()
+            decisions = bot.call_deepseek_api(prompt)
+            ai_calls_count += 1
+
+            if not decisions:
+                logging.warning("Iteration %d: no decisions returned by LLM.", idx)
+            else:
+                bot.process_ai_decisions(decisions)
         else:
-            bot.process_ai_decisions(decisions)
+            # Skip AI call - just log progress
+            if idx % 10 == 0:
+                logging.info("Skipping AI call for bar %d/%d (No major events)", idx, len(timeline))
 
         total_equity = bot.calculate_total_equity()
         bot.register_equity_snapshot(total_equity)
-        bot.log_portfolio_state()
+        # bot.log_portfolio_state() # Reduced logging for speed
         bot.save_state()
 
         current_dt = simulated_time()
-        logging.info(
-            "Processed bar %d/%d at %s | Equity: %.2f | Positions: %d",
-            idx,
-            len(timeline),
-            current_dt.isoformat(),
-            total_equity,
-            len(bot.positions),
-        )
+        if should_call_ai or idx % 50 == 0:
+            logging.info(
+                "Processed bar %d/%d at %s | Equity: %.2f | Positions: %d | AI Calls: %d",
+                idx,
+                len(timeline),
+                current_dt.isoformat(),
+                total_equity,
+                len(bot.positions),
+                ai_calls_count
+            )
 
     final_equity = bot.calculate_total_equity()
     total_return_pct = ((final_equity - bot.START_CAPITAL) / bot.START_CAPITAL) * 100 if bot.START_CAPITAL else 0.0
@@ -625,10 +760,28 @@ def main() -> None:
     }
 
     results_path = cfg.run_dir / "backtest_results.json"
-    with open(results_path, "w") as fh:
+    with open(results_path, "w", encoding='utf-8') as fh:
         json.dump(results, fh, indent=2)
 
     logging.info("Backtest complete. Results written to %s", results_path)
+
+    # Send Telegram notification if enabled
+    if not cfg.disable_telegram and bot.TELEGRAM_BOT_TOKEN:
+        try:
+            msg = (
+                f"📊 *Backtest Complete*\n\n"
+                f"🚀 *Model:* `{bot.LLM_MODEL_NAME}`\n"
+                f"📈 *Total Return:* `{total_return_pct:.2f}%`\n"
+                f"📉 *Max Drawdown:* `{(max_drawdown * 100) if max_drawdown is not None else 0:.2f}%`\n"
+                f"🛡️ *Sortino Ratio:* `{sortino if sortino is not None else 0:.2f}`\n\n"
+                f"💼 *Final Equity:* `${final_equity:.2f}`\n"
+                f"🔄 *Total Trades:* `{trade_stats['total_trades']}`\n"
+                f"✅ *Win Rate:* `{trade_stats['win_rate_pct'] if trade_stats['win_rate_pct'] is not None else 0:.1f}%`\n"
+            )
+            bot.send_telegram_message(msg)
+            logging.info("Sent backtest summary to Telegram.")
+        except Exception as exc:
+            logging.warning("Failed to send Telegram summary: %s", exc)
 
 
 if __name__ == "__main__":

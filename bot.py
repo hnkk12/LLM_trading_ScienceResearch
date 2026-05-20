@@ -471,12 +471,12 @@ last_btc_price: Optional[float] = None
 def init_csv_files() -> None:
     """Initialize CSV files with headers."""
     if not STATE_CSV.exists():
-        with open(STATE_CSV, 'w', newline='') as f:
+        with open(STATE_CSV, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow(STATE_COLUMNS)
     else:
         try:
-            df = pd.read_csv(STATE_CSV)
+            df = pd.read_csv(STATE_CSV, encoding='utf-8')
         except Exception as exc:
             logging.warning("Unable to load %s for schema check: %s", STATE_CSV, exc)
         else:
@@ -489,10 +489,10 @@ def init_csv_files() -> None:
                 except KeyError:
                     # Fall back to writing header only if severe mismatch
                     df = pd.DataFrame(columns=STATE_COLUMNS)
-                df.to_csv(STATE_CSV, index=False)
+                df.to_csv(STATE_CSV, index=False, encoding='utf-8')
     
     if not TRADES_CSV.exists():
-        with open(TRADES_CSV, 'w', newline='') as f:
+        with open(TRADES_CSV, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 'timestamp', 'coin', 'action', 'side', 'quantity', 'price',
@@ -501,14 +501,14 @@ def init_csv_files() -> None:
             ])
     
     if not DECISIONS_CSV.exists():
-        with open(DECISIONS_CSV, 'w', newline='') as f:
+        with open(DECISIONS_CSV, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 'timestamp', 'coin', 'signal', 'reasoning', 'confidence'
             ])
 
     if not MESSAGES_CSV.exists():
-        with open(MESSAGES_CSV, 'w', newline='') as f:
+        with open(MESSAGES_CSV, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
             writer.writerow([
                 'timestamp', 'direction', 'role', 'content', 'metadata'
@@ -517,6 +517,10 @@ def init_csv_files() -> None:
 def get_btc_benchmark_price() -> Optional[float]:
     """Fetch the current BTC/USDT price for benchmarking."""
     global last_btc_price
+    # Skip benchmark if not in crypto mode or BTCUSDT data is missing
+    if "BTCUSDT" not in SYMBOLS and not any("BTC" in s for s in SYMBOLS):
+        return None
+        
     data = fetch_market_data("BTCUSDT")
     if data and "price" in data:
         try:
@@ -540,7 +544,7 @@ def log_portfolio_state() -> None:
     btc_price = get_btc_benchmark_price()
     btc_price_str = f"{btc_price:.2f}" if btc_price is not None else ""
 
-    with open(STATE_CSV, 'a', newline='') as f:
+    with open(STATE_CSV, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             get_current_time().isoformat(),
@@ -556,7 +560,7 @@ def log_portfolio_state() -> None:
 
 def log_trade(coin: str, action: str, details: Dict[str, Any]) -> None:
     """Log trade execution."""
-    with open(TRADES_CSV, 'a', newline='') as f:
+    with open(TRADES_CSV, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             get_current_time().isoformat(),
@@ -576,7 +580,7 @@ def log_trade(coin: str, action: str, details: Dict[str, Any]) -> None:
 
 def log_ai_decision(coin: str, signal: str, reasoning: str, confidence: float) -> None:
     """Log AI decision."""
-    with open(DECISIONS_CSV, 'a', newline='') as f:
+    with open(DECISIONS_CSV, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             get_current_time().isoformat(),
@@ -589,7 +593,7 @@ def log_ai_decision(coin: str, signal: str, reasoning: str, confidence: float) -
 
 def log_ai_message(direction: str, role: str, content: str, metadata: Optional[Dict[str, Any]] = None) -> None:
     """Log raw messages exchanged with the AI provider."""
-    with open(MESSAGES_CSV, 'a', newline='') as f:
+    with open(MESSAGES_CSV, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
         writer.writerow([
             get_current_time().isoformat(),
@@ -793,7 +797,7 @@ def load_state() -> None:
 def save_state() -> None:
     """Persist current balance, open positions, and iteration counter."""
     try:
-        with open(STATE_JSON, "w") as f:
+        with open(STATE_JSON, "w", encoding='utf-8') as f:
             json.dump(
                 {
                     "balance": balance,
@@ -986,6 +990,10 @@ def fetch_market_data(symbol: str) -> Optional[Dict[str, Any]]:
                 "ignore",
             ],
         )
+
+        if df.empty:
+            logging.warning("Market data for %s is empty; skipping.", symbol)
+            return None
 
         df["close"] = df["close"].astype(float)
         df["high"] = df["high"].astype(float)
@@ -1328,8 +1336,13 @@ def format_prompt_for_deepseek() -> str:
     prompt_lines.append("-" * 80)
     prompt_lines.append("CURRENT MARKET STATE FOR ALL COINS (Multi-Timeframe Analysis)")
 
+    # Build market snapshot section
+    is_daily_only = (INTERVAL == "1d")
+    
     for symbol in SYMBOLS:
-        coin = SYMBOL_TO_COIN[symbol]
+        coin = SYMBOL_TO_COIN[coin_entry] if 'coin_entry' in locals() else SYMBOL_TO_COIN.get(symbol, symbol)
+        # Fix: ensure we use the correct coin name from market_snapshots
+        coin = SYMBOL_TO_COIN.get(symbol, symbol)
         data = market_snapshots.get(coin)
         if not data:
             continue
@@ -1338,130 +1351,148 @@ def format_prompt_for_deepseek() -> str:
         structure = data["structure"]
         trend = data["trend"]
         trend_components = data.get("trend_components", {})
-        open_interest = data["open_interest"]
+        open_interest = data.get("open_interest", {})
         funding_rates = data.get("funding_rates", [])
         funding_avg_str = fmt_rate(float(np.mean(funding_rates))) if funding_rates else "N/A"
-
+        
         prompt_lines.append(f"\n{coin} MARKET SNAPSHOT")
         prompt_lines.append(f"Current Price: {fmt(data['price'], 3)}")
-        prompt_lines.append(
-            f"Open Interest (latest/avg): {fmt(open_interest.get('latest'), 2)} / {fmt(open_interest.get('average'), 2)}"
-        )
-        prompt_lines.append(
-            f"Funding Rate (latest/avg): {fmt_rate(data['funding_rate'])} / {funding_avg_str}"
-        )
+        
+        if is_daily_only:
+            # Optimized 1D prompt: Skip redundant timeframe labels
+            prompt_lines.append(f"  ANALYSIS (1D):")
+            prompt_lines.append(f"    EMA Alignment: EMA20={fmt(trend['ema20'], 3)}, EMA50={fmt(trend['ema50'], 3)}, EMA200={fmt(trend['ema200'], 3)}")
+            prompt_lines.append(f"    Indicators: RSI14={fmt(trend['rsi14'], 2)}, MACD={fmt(trend['macd'], 3)}, ATR14={fmt(trend['atr'], 3)}, ADX14={fmt(trend.get('adx'), 2)}")
+            
+            if trend["macd"] > trend["macd_signal"]:
+                macd_direction = "bullish"
+            elif trend["macd"] < trend["macd_signal"]:
+                macd_direction = "bearish"
+            else:
+                macd_direction = "neutral"
+            prompt_lines.append(f"    MACD Crossover: {macd_direction}")
 
-        prompt_lines.append(f"\n  4H TREND TIMEFRAME:")
-        prompt_lines.append(
-            f"    EMA Alignment: EMA20={fmt(trend['ema20'], 3)}, EMA50={fmt(trend['ema50'], 3)}, EMA200={fmt(trend['ema200'], 3)}"
-        )
-        ema_trend = (
-            "BULLISH"
-            if trend["ema20"] > trend["ema50"]
-            else "BEARISH"
-            if trend["ema20"] < trend["ema50"]
-            else "NEUTRAL"
-        )
-        prompt_lines.append(f"    Trend Classification: {ema_trend}")
-        prompt_lines.append(
-            f"    MACD: {fmt(trend['macd'], 3)}, Signal: {fmt(trend['macd_signal'], 3)}, Histogram: {fmt(trend['macd_histogram'], 3)}"
-        )
-        prompt_lines.append(
-            f"    MACD Histogram Avg (|20|): {fmt(trend.get('macd_histogram_avg'), 3)}"
-        )
-        prompt_lines.append(f"    RSI14: {fmt(trend['rsi14'], 2)}")
-        prompt_lines.append(f"    ATR14: {fmt(trend['atr'], 3)}")
-        prompt_lines.append(f"    ADX14: {fmt(trend.get('adx'), 2)}")
-        prompt_lines.append(
-            f"    Trend Strength Score: {fmt(trend.get('trend_strength'), 2)} "
-            f"(EMA {fmt(trend_components.get('ema_component'), 2)}, "
-            f"MACD ratio {fmt(trend_components.get('macd_ratio'), 2)}, "
-            f"RSI {fmt(trend_components.get('rsi_component'), 2)}, "
-            f"ADX {fmt(trend_components.get('adx_component'), 2)})"
-        )
-        prompt_lines.append(
-            f"    Volume: Current {fmt(trend['current_volume'], 2)}, Average {fmt(trend['average_volume'], 2)}"
-        )
-        prompt_lines.append(
-            f"    4H Series (last 10): Close={json.dumps(trend['series']['close'])}"
-        )
-        prompt_lines.append(
-            f"                         EMA20={json.dumps(trend['series']['ema20'])}, EMA50={json.dumps(trend['series']['ema50'])}"
-        )
-        prompt_lines.append(
-            f"                         MACD={json.dumps(trend['series']['macd'])}, RSI14={json.dumps(trend['series']['rsi14'])}"
-        )
-
-        prompt_lines.append(f"\n  1H STRUCTURE TIMEFRAME:")
-        prompt_lines.append(
-            f"    EMA20: {fmt(structure['ema20'], 3)}, EMA50: {fmt(structure['ema50'], 3)}"
-        )
-        struct_position = "above" if data["price"] > structure["ema20"] else "below"
-        prompt_lines.append(f"    Price relative to 1H EMA20: {struct_position}")
-        prompt_lines.append(
-            f"    Swing High: {fmt(structure['swing_high'], 3)}, Swing Low: {fmt(structure['swing_low'], 3)}"
-        )
-        prompt_lines.append(f"    RSI14: {fmt(structure['rsi14'], 2)}")
-        prompt_lines.append(
-            f"    MACD: {fmt(structure['macd'], 3)}, Signal: {fmt(structure['macd_signal'], 3)}"
-        )
-        prompt_lines.append(f"    ATR14: {fmt(structure['atr'], 3)}")
-        prompt_lines.append(f"    Volume Ratio: {fmt(structure['volume_ratio'], 2)}x (>1.5 = volume spike)")
-        prompt_lines.append(
-            f"    1H Series (last 10): Close={json.dumps(structure['series']['close'])}"
-        )
-        prompt_lines.append(
-            f"                         EMA20={json.dumps(structure['series']['ema20'])}, EMA50={json.dumps(structure['series']['ema50'])}"
-        )
-        prompt_lines.append(
-            f"                         Swing High={json.dumps(structure['series']['swing_high'])}, Swing Low={json.dumps(structure['series']['swing_low'])}"
-        )
-        prompt_lines.append(
-            f"                         RSI14={json.dumps(structure['series']['rsi14'])}"
-        )
-        prompt_lines.append(
-            f"                         ATR14={json.dumps(structure['series']['atr'])}"
-        )
-
-        prompt_lines.append(f"\n  {INTERVAL.upper()} EXECUTION TIMEFRAME:")
-        prompt_lines.append(
-            f"    EMA20: {fmt(execution['ema20'], 3)} (Price {'above' if data['price'] > execution['ema20'] else 'below'} EMA20)"
-        )
-        prompt_lines.append(
-            f"    MACD: {fmt(execution['macd'], 3)}, Signal: {fmt(execution['macd_signal'], 3)}"
-        )
-        if execution["macd"] > execution["macd_signal"]:
-            macd_direction = "bullish"
-        elif execution["macd"] < execution["macd_signal"]:
-            macd_direction = "bearish"
+            prompt_lines.append(
+                f"    Trend Strength Score: {fmt(data.get('trend_strength'), 2)} "
+                f"(EMA {fmt(trend_components.get('ema_component'), 2)}, "
+                f"MACD ratio {fmt(trend_components.get('macd_ratio'), 2)}, "
+                f"RSI {fmt(trend_components.get('rsi_component'), 2)}, "
+                f"ADX {fmt(trend_components.get('adx_component'), 2)})"
+            )
+            prompt_lines.append(f"    History (last 10): {json.dumps(trend['series']['close'])}")
         else:
-            macd_direction = "neutral"
-        prompt_lines.append(f"    MACD Crossover: {macd_direction}")
-        prompt_lines.append(f"    RSI14: {fmt(execution['rsi14'], 2)}")
-        rsi_zone = (
-            "oversold (<35)"
-            if execution["rsi14"] < 35
-            else "overbought (>65)"
-            if execution["rsi14"] > 65
-            else "neutral"
-        )
-        prompt_lines.append(f"    RSI Zone: {rsi_zone}")
-        prompt_lines.append(f"    ATR14: {fmt(execution['atr'], 3)}")
-        prompt_lines.append(
-            f"    {INTERVAL.upper()} Series (last 10): Mid-Price={json.dumps(execution['series']['mid_prices'])}"
-        )
-        prompt_lines.append(
-            f"                          EMA20={json.dumps(execution['series']['ema20'])}"
-        )
-        prompt_lines.append(
-            f"                          MACD={json.dumps(execution['series']['macd'])}"
-        )
-        prompt_lines.append(
-            f"                          RSI14={json.dumps(execution['series']['rsi14'])}"
-        )
-        prompt_lines.append(
-            f"                          ATR14={json.dumps(execution['series']['atr'])}"
-        )
+            # Original Multi-timeframe prompt
+            prompt_lines.append(f"\n  4H TREND TIMEFRAME:")
+            prompt_lines.append(f"    EMA Alignment: EMA20={fmt(trend['ema20'], 3)}, EMA50={fmt(trend['ema50'], 3)}, EMA200={fmt(trend['ema200'], 3)}")
+            ema_trend = (
+                "BULLISH"
+                if trend["ema20"] > trend["ema50"]
+                else "BEARISH"
+                if trend["ema20"] < trend["ema50"]
+                else "NEUTRAL"
+            )
+            prompt_lines.append(f"    Trend Classification: {ema_trend}")
+            prompt_lines.append(
+                f"    MACD: {fmt(trend['macd'], 3)}, Signal: {fmt(trend['macd_signal'], 3)}, Histogram: {fmt(trend['macd_histogram'], 3)}"
+            )
+            prompt_lines.append(
+                f"    MACD Histogram Avg (|20|): {fmt(trend.get('macd_histogram_avg'), 3)}"
+            )
+            prompt_lines.append(f"    RSI14: {fmt(trend['rsi14'], 2)}")
+            prompt_lines.append(f"    ATR14: {fmt(trend['atr'], 3)}")
+            prompt_lines.append(f"    ADX14: {fmt(trend.get('adx'), 2)}")
+            prompt_lines.append(
+                f"    Trend Strength Score: {fmt(trend.get('trend_strength'), 2)} "
+                f"(EMA {fmt(trend_components.get('ema_component'), 2)}, "
+                f"MACD ratio {fmt(trend_components.get('macd_ratio'), 2)}, "
+                f"RSI {fmt(trend_components.get('rsi_component'), 2)}, "
+                f"ADX {fmt(trend_components.get('adx_component'), 2)})"
+            )
+            prompt_lines.append(
+                f"    Volume: Current {fmt(trend['current_volume'], 2)}, Average {fmt(trend['average_volume'], 2)}"
+            )
+            prompt_lines.append(
+                f"    4H Series (last 10): Close={json.dumps(trend['series']['close'])}"
+            )
+            prompt_lines.append(
+                f"                         EMA20={json.dumps(trend['series']['ema20'])}, EMA50={json.dumps(trend['series']['ema50'])}"
+            )
+            prompt_lines.append(
+                f"                         MACD={json.dumps(trend['series']['macd'])}, RSI14={json.dumps(trend['series']['rsi14'])}"
+            )
+
+            prompt_lines.append(f"\n  1H STRUCTURE TIMEFRAME:")
+            prompt_lines.append(
+                f"    EMA20: {fmt(structure['ema20'], 3)}, EMA50: {fmt(structure['ema50'], 3)}"
+            )
+            struct_position = "above" if data["price"] > structure["ema20"] else "below"
+            prompt_lines.append(f"    Price relative to 1H EMA20: {struct_position}")
+            prompt_lines.append(
+                f"    Swing High: {fmt(structure['swing_high'], 3)}, Swing Low: {fmt(structure['swing_low'], 3)}"
+            )
+            prompt_lines.append(f"    RSI14: {fmt(structure['rsi14'], 2)}")
+            prompt_lines.append(
+                f"    MACD: {fmt(structure['macd'], 3)}, Signal: {fmt(structure['macd_signal'], 3)}"
+            )
+            prompt_lines.append(f"    ATR14: {fmt(structure['atr'], 3)}")
+            prompt_lines.append(f"    Volume Ratio: {fmt(structure['volume_ratio'], 2)}x (>1.5 = volume spike)")
+            prompt_lines.append(
+                f"    1H Series (last 10): Close={json.dumps(structure['series']['close'])}"
+            )
+            prompt_lines.append(
+                f"                         EMA20={json.dumps(structure['series']['ema20'])}, EMA50={json.dumps(structure['series']['ema50'])}"
+            )
+            prompt_lines.append(
+                f"                         Swing High={json.dumps(structure['series']['swing_high'])}, Swing Low={json.dumps(structure['series']['swing_low'])}"
+            )
+            prompt_lines.append(
+                f"                         RSI14={json.dumps(structure['series']['rsi14'])}"
+            )
+            prompt_lines.append(
+                f"                         ATR14={json.dumps(structure['series']['atr'])}"
+            )
+
+            prompt_lines.append(f"\n  {INTERVAL.upper()} EXECUTION TIMEFRAME:")
+            prompt_lines.append(
+                f"    EMA20: {fmt(execution['ema20'], 3)} (Price {'above' if data['price'] > execution['ema20'] else 'below'} EMA20)"
+            )
+            prompt_lines.append(
+                f"    MACD: {fmt(execution['macd'], 3)}, Signal: {fmt(execution['macd_signal'], 3)}"
+            )
+            if execution["macd"] > execution["macd_signal"]:
+                macd_direction = "bullish"
+            elif execution["macd"] < execution["macd_signal"]:
+                macd_direction = "bearish"
+            else:
+                macd_direction = "neutral"
+
+            prompt_lines.append(f"    MACD Crossover: {macd_direction}")
+            prompt_lines.append(f"    RSI14: {fmt(execution['rsi14'], 2)}")
+            rsi_zone = (
+                "oversold (<35)"
+                if execution["rsi14"] < 35
+                else "overbought (>65)"
+                if execution["rsi14"] > 65
+                else "neutral"
+            )
+            prompt_lines.append(f"    RSI Zone: {rsi_zone}")
+            prompt_lines.append(f"    ATR14: {fmt(execution['atr'], 3)}")
+            prompt_lines.append(
+                f"    {INTERVAL.upper()} Series (last 10): Mid-Price={json.dumps(execution['series']['mid_prices'])}"
+            )
+            prompt_lines.append(
+                f"                          EMA20={json.dumps(execution['series']['ema20'])}"
+            )
+            prompt_lines.append(
+                f"                          MACD={json.dumps(execution['series']['macd'])}"
+            )
+            prompt_lines.append(
+                f"                          RSI14={json.dumps(execution['series']['rsi14'])}"
+            )
+            prompt_lines.append(
+                f"                          ATR14={json.dumps(execution['series']['atr'])}"
+            )
+
 
         prompt_lines.append(f"\n  MARKET SENTIMENT:")
         prompt_lines.append(
