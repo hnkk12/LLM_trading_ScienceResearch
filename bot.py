@@ -587,6 +587,40 @@ def log_trade(coin: str, action: str, details: Dict[str, Any]) -> None:
             details.get('reason', '')
         ])
 
+def get_recent_trades_feedback(limit: int = 5) -> str:
+    """Retrieve and format the last few closed trades for AI feedback loop."""
+    if not TRADES_CSV.exists():
+        return "No trade history available yet."
+    
+    try:
+        df = pd.read_csv(TRADES_CSV)
+        if df.empty:
+            return "No trade history available yet."
+        
+        # Filter for closed trades (CLOSE or CLOSE_PARTIAL)
+        # We look for rows where action is 'CLOSE' or 'CLOSE_PARTIAL'
+        closed_trades = df[df['action'].str.contains('CLOSE', case=False, na=False)].tail(limit)
+        
+        if closed_trades.empty:
+            return "No recently closed trades to learn from."
+        
+        feedback_lines = []
+        for _, row in closed_trades.iterrows():
+            try:
+                pnl_val = float(row['pnl'])
+            except (ValueError, TypeError):
+                pnl_val = 0.0
+            status = "WIN" if pnl_val > 0 else "LOSS" if pnl_val < 0 else "BREAKEVEN"
+            coin = row['coin']
+            side = str(row['side']).upper()
+            reason = row.get('reason', 'No reason provided')
+            feedback_lines.append(f"- [{status}] {side} {coin}: PnL=${pnl_val:.2f}. Reason: {reason}")
+            
+        return "\n".join(feedback_lines)
+    except Exception as e:
+        logging.error(f"Error reading trade history for feedback loop: {e}")
+        return "Error retrieving trade history."
+
 def log_ai_decision(coin: str, signal: str, reasoning: str, confidence: float) -> None:
     """Log AI decision."""
     with open(DECISIONS_CSV, 'a', newline='', encoding='utf-8') as f:
@@ -1509,6 +1543,10 @@ def format_trading_prompt() -> str:
             f"    Funding Rate: Latest={fmt_rate(data['funding_rate'])}, Average={funding_avg_str}"
         )
         prompt_lines.append("-" * 80)
+
+    prompt_lines.append("RECENT TRADE HISTORY (FEEDBACK LOOP)")
+    prompt_lines.append(get_recent_trades_feedback(limit=5))
+    prompt_lines.append("-" * 80)
 
     prompt_lines.append("ACCOUNT INFORMATION AND PERFORMANCE")
     prompt_lines.append(f"- Total Return (%): {fmt(total_return, 2)}")
