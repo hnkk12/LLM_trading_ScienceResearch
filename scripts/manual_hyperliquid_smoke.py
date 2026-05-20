@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Manual smoke test for Hyperliquid live trading.
+Manual smoke test for Hyperliquid live trading..
 
 This script places a tiny live trade (default ~2 USD notional on BTC) using the
 environment credentials, waits briefly, and then closes the position. It is

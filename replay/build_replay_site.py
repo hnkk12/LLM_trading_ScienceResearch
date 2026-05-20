@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate an animated trade replay web page from archived backtest data.
 
-The script reads the CSV/JSON artifacts under ``replay/data`` and emits a
+The script reads the CSV/JSON artifacts under ``replay/data`` .. and emits a
 standalone ``index.html`` that visualizes the portfolio curve and trade events.
 It purposefully avoids heavy dependencies (such as pandas) so it can run inside
 the lightweight Codex environment or any vanilla Python installation.

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 # Runs the backtest inside Docker with start/end overrides and an optional
-# system prompt file. Results are written to data-backtest/run-<id> on the host.
+# system prompt file. Results are written to data-backtest/run-<id> on the host...
 
 usage() {
   cat <<'EOF'

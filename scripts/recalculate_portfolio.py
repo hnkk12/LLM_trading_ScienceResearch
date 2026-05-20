@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Recalculate portfolio state from trade history.
+Recalculate portfolio state from trade history..
 
 Use this when manual edits were made to trade_history.csv
 and the persisted state/json needs to be reconciled.
