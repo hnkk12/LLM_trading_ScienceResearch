@@ -21,11 +21,13 @@ Hệ thống giao dịch tự động sử dụng trí tuệ nhân tạo (DeepSe
 ## 🛠 Cài đặt & Cấu hình
 
 1. **Cài đặt thư viện:**
+
    ```bash
    pip install -r requirements.txt
    ```
 
 2. **Cấu hình file `.env`:**
+
    ```env
    # API Keys
    OPENROUTER_API_KEY=your_key
@@ -43,25 +45,36 @@ Hệ thống giao dịch tự động sử dụng trí tuệ nhân tạo (DeepSe
 ## 📈 Cách sử dụng
 
 ### 1. Chạy Backtest (Dữ liệu Local)
+
 Bot sẽ quét folder `dataset`, nạp dữ liệu và bắt đầu giả lập. AI sẽ chỉ "thức dậy" khi có sự kiện quan trọng để tiết kiệm token.
+
 ```bash
 python backtest.py
 ```
 
 ### 2. Chạy Giao dịch thực tế (Paper/Live)
+
 Bot sẽ lấy dữ liệu trực tiếp từ sàn Binance và thực hiện lệnh trên Hyperliquid.
+
 ```bash
 python bot.py
 ```
 
+### 3. Up lên index.html
+
+Sau khi chạy xong backtest, dùng lệnh python replay/build_replay_site.py --data data-backtest/run-xxx-xxx (ví dụ: 20260520-124919) sẽ có 1 file index.html trong folder replay
+
 ## 📊 Chiến thuật của AI
+
 Bot sử dụng mô hình DeepSeek V3.1 với khả năng suy nghĩ (Reasoning). Các thông số kỹ thuật cung cấp cho AI bao gồm:
+
 - **EMA:** 20, 50, 200 (Xác định xu hướng).
 - **RSI & MACD:** Xác định động lượng và điểm đảo chiều.
 - **ATR:** Tính toán khoảng cách đặt Stop Loss và Take Profit theo biến động thực tế.
 - **Trend Strength Score:** Điểm số sức mạnh xu hướng do hệ thống tự tính toán.
 
 ## ⚠️ Lưu ý
+
 - Backtest chỉ mang tính chất tham khảo dựa trên dữ liệu lịch sử.
 - Luôn kiểm tra kỹ cấu hình `risk_usd` trong Prompt để quản lý vốn an toàn.
 - Đảm bảo các file CSV trong `dataset` có định dạng: `Date, Price, Open, High, Low, Vol.`.

@@ -698,7 +698,7 @@ def main() -> None:
 
         total_equity = bot.calculate_total_equity()
         bot.register_equity_snapshot(total_equity)
-        # bot.log_portfolio_state() # Reduced logging for speed
+        bot.log_portfolio_state() # Reduced logging for speed
         bot.save_state()
 
         current_dt = simulated_time()
