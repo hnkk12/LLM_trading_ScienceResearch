@@ -22,6 +22,8 @@ import pandas as pd
 from binance.client import Client
 from dotenv import load_dotenv
 
+import bot
+
 # Columns returned by Binance kline endpoints
 KLINE_COLUMNS: List[str] = [
     "timestamp",
@@ -236,7 +238,7 @@ class BacktestConfig:
             except ValueError:
                 logging.warning("Invalid BACKTEST_START_CAPITAL '%s'; ignoring.", start_capital_raw)
 
-        disable_telegram = os.getenv("BACKTEST_DISABLE_TELEGRAM", "true").strip().lower() in {"1", "true", "yes", "on"}
+        disable_telegram = os.getenv("BACKTEST_DISABLE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
 
         base_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -367,6 +369,13 @@ def load_from_dataset(symbol: str, cfg: BacktestConfig) -> pd.DataFrame:
         normalized["close"] = pd.to_numeric(df[price_col], errors="coerce")
         normalized["volume"] = df[vol_col].apply(parse_dataset_volume)
         
+        # Drop rows with NaN in critical price columns
+        before_count = len(normalized)
+        normalized.dropna(subset=["open", "high", "low", "close"], inplace=True)
+        after_count = len(normalized)
+        if after_count < before_count:
+            logging.warning("Dropped %d rows with NaN prices for %s", before_count - after_count, symbol)
+
         # Add required kline columns
         normalized["close_time"] = normalized["timestamp"] + 86399999 # Default to 1 day
         normalized["quote_volume"] = 0.0
@@ -431,97 +440,11 @@ class HistoricalBinanceClient:
         return datetime.fromtimestamp(self._current_timestamp_ms / 1000, tz=timezone.utc)
 
 
-def compute_max_drawdown(equity_values: Iterable[float]) -> Optional[float]:
-    values = np.array([v for v in equity_values if np.isfinite(v)], dtype=float)
-    if values.size < 2:
-        return None
-    peaks = np.maximum.accumulate(values)
-    drawdowns = (peaks - values) / peaks
-    return float(drawdowns.max()) if drawdowns.size else None
-
-
-def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
-    empty_stats = {
-        "total_trades": 0,
-        "closed_trades": 0,
-        "partial_closes": 0,
-        "close_events": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "breakeven_trades": 0,
-        "win_rate_pct": None,
-        "net_realized_pnl": 0.0,
-        "avg_win_pnl": None,
-        "avg_loss_pnl": None,
-        "profit_factor": None,
-        "avg_trade_pnl": None,
-    }
-
-    if not trades_path.exists():
-        return dict(empty_stats)
-
-    try:
-        df = pd.read_csv(trades_path)
-    except Exception as exc:  # pragma: no cover - defensive against bad CSVs
-        logging.warning("Unable to load trade history from %s: %s", trades_path, exc)
-        return dict(empty_stats)
-
-    if df.empty or "action" not in df:
-        return dict(empty_stats)
-
-    actions = df["action"].astype(str).str.upper().str.strip()
-    entries_mask = actions == "ENTRY"
-    closes_mask = actions == "CLOSE"
-    partial_mask = actions == "CLOSE_PARTIAL"
-    close_events_mask = closes_mask | partial_mask
-
-    total_trades = int(entries_mask.sum())
-    full_closes = int(closes_mask.sum())
-    partial_closes = int(partial_mask.sum())
-
-    close_trades = df.loc[close_events_mask].copy()
-    if close_trades.empty:
-        return {
-            **empty_stats,
-            "total_trades": total_trades,
-            "closed_trades": full_closes,
-            "partial_closes": partial_closes,
-        }
-
-    close_trades["pnl"] = pd.to_numeric(close_trades["pnl"], errors="coerce")
-    close_trades = close_trades[np.isfinite(close_trades["pnl"])]
-
-    close_events = int(len(close_trades))
-    winning = int((close_trades["pnl"] > 0).sum())
-    losing = int((close_trades["pnl"] < 0).sum())
-    breakeven = int((close_trades["pnl"] == 0).sum())
-    win_rate = (winning / close_events) * 100 if close_events else None
-    net_realized = float(close_trades["pnl"].sum()) if close_events else 0.0
-    avg_trade = net_realized / close_events if close_events else None
-
-    wins = close_trades[close_trades["pnl"] > 0]["pnl"]
-    losses = close_trades[close_trades["pnl"] < 0]["pnl"]
-    avg_win = float(wins.mean()) if not wins.empty else None
-    avg_loss = float(losses.mean()) if not losses.empty else None
-    gross_profit = float(wins.sum()) if not wins.empty else 0.0
-    gross_loss = float(-losses.sum()) if not losses.empty else 0.0
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
-
-    return {
-        "total_trades": total_trades,
-        "closed_trades": full_closes,
-        "partial_closes": partial_closes,
-        "close_events": close_events,
-        "winning_trades": winning,
-        "losing_trades": losing,
-        "breakeven_trades": breakeven,
-        "win_rate_pct": float(win_rate) if win_rate is not None else None,
-        "net_realized_pnl": net_realized,
-        "avg_win_pnl": avg_win,
-        "avg_loss_pnl": avg_loss,
-        "profit_factor": profit_factor,
-        "avg_trade_pnl": avg_trade,
-    }
+# Re-use bot's performance utility functions
+compute_max_drawdown = bot.compute_max_drawdown
+estimate_period_seconds = bot.estimate_period_seconds
+compute_sharpe_ratio = bot.compute_sharpe_ratio
+summarize_trades = bot.summarize_trades
 
 
 def configure_environment(cfg: BacktestConfig) -> None:
@@ -635,6 +558,8 @@ def main() -> None:
     print(f"LLM model used for this backtest: {bot.LLM_MODEL_NAME}")
 
     ai_calls_count = 0
+    last_ai_idx = -10  # Track the last bar index where AI was called
+    
     for idx, timestamp_ms in enumerate(timeline, start=1):
         time_holder["value"] = int(timestamp_ms)
         historical_client.set_current_timestamp(int(timestamp_ms))
@@ -676,7 +601,34 @@ def main() -> None:
                     event_reason = f"RSI extreme in {symbol} ({data['rsi']:.1f})"
                     break
         
-        # Reason D: First and Last days (Always call for initial setup and final wrap)
+        # Reason D: Daily selective check (Aggressive entry mode)
+        is_daily = cfg.interval.lower() in ("1d", "d")
+        if is_daily:
+            # Short cooldown: 1 day only
+            cooldown_days = 1
+            in_cooldown = (idx - last_ai_idx) < cooldown_days
+            
+            for symbol in bot.SYMBOLS:
+                klines = historical_client.get_klines(symbol, cfg.interval, limit=2)
+                if len(klines) >= 2:
+                    prev_close = float(klines[-2][4])
+                    curr_close = float(klines[-1][4])
+                    day_change = abs((curr_close - prev_close) / prev_close)
+                    
+                    data = bot.fetch_market_data(symbol)
+                    # Broad RSI zones: < 42 or > 58
+                    rsi_active = data and (data["rsi"] < 42 or data["rsi"] > 58)
+                    
+                    # Trigger on 0.8% move or active RSI
+                    if (not in_cooldown and (day_change >= 0.008 or rsi_active)) or (day_change >= 0.02):
+                        should_call_ai = True
+                        event_reason = f"Aggressive Opportunity in {symbol} ({day_change*100:.1f}%)"
+                        break
+        elif idx % 4 == 0:
+            should_call_ai = True
+            event_reason = "Periodic opportunity search"
+
+        # Reason E: First and Last days (Always call for initial setup and final wrap)
         if idx == 1 or idx == len(timeline):
             should_call_ai = True
             event_reason = "Initial/Final iteration"
@@ -686,15 +638,16 @@ def main() -> None:
             prompt = bot.format_prompt_for_deepseek()
             decisions = bot.call_deepseek_api(prompt)
             ai_calls_count += 1
+            last_ai_idx = idx # Update last call index
 
             if not decisions:
                 logging.warning("Iteration %d: no decisions returned by LLM.", idx)
             else:
                 bot.process_ai_decisions(decisions)
         else:
-            # Skip AI call - just log progress
+            # Skip AI call - just log progress every 10 bars
             if idx % 10 == 0:
-                logging.info("Skipping AI call for bar %d/%d (No major events)", idx, len(timeline))
+                logging.info("Skipping AI call for bar %d/%d (No major events or in cooldown)", idx, len(timeline))
 
         total_equity = bot.calculate_total_equity()
         bot.register_equity_snapshot(total_equity)
@@ -717,7 +670,27 @@ def main() -> None:
     total_return_pct = ((final_equity - bot.START_CAPITAL) / bot.START_CAPITAL) * 100 if bot.START_CAPITAL else 0.0
     sortino = bot.calculate_sortino_ratio(bot.equity_history, interval_seconds, bot.RISK_FREE_RATE)
     max_drawdown = compute_max_drawdown(bot.equity_history)
+    
+    # Load trades for Sharpe calculation
+    trades_df = pd.DataFrame()
+    if bot.TRADES_CSV.exists():
+        try:
+            trades_df = pd.read_csv(bot.TRADES_CSV)
+        except Exception:
+            pass
+    sharpe = compute_sharpe_ratio(trades_df)
+    
     trade_stats = summarize_trades(bot.TRADES_CSV)
+    
+    # Detailed trade-by-trade list
+    detailed_trades = []
+    if not trades_df.empty:
+        detailed_trades = trades_df.to_dict(orient="records")
+    
+    # Recovery Factor: Total Return / Max Drawdown (as percentages)
+    recovery_factor = None
+    if max_drawdown is not None and max_drawdown > 0:
+        recovery_factor = total_return_pct / (max_drawdown * 100)
 
     results = {
         "run_id": cfg.run_id,
@@ -736,7 +709,9 @@ def main() -> None:
             "final_equity": final_equity,
             "total_return_pct": total_return_pct,
             "max_drawdown_pct": (max_drawdown * 100) if max_drawdown is not None else None,
+            "sharpe_ratio": sharpe,
             "sortino_ratio": sortino,
+            "recovery_factor": recovery_factor,
         },
         "llm": {
             "model": bot.LLM_MODEL_NAME,
@@ -756,6 +731,7 @@ def main() -> None:
             },
         },
         "trading": trade_stats,
+        "detailed_trades": detailed_trades,
         "generated_at": simulated_time().isoformat(),
     }
 
@@ -765,23 +741,7 @@ def main() -> None:
 
     logging.info("Backtest complete. Results written to %s", results_path)
 
-    # Send Telegram notification if enabled
-    if not cfg.disable_telegram and bot.TELEGRAM_BOT_TOKEN:
-        try:
-            msg = (
-                f"📊 *Backtest Complete*\n\n"
-                f"🚀 *Model:* `{bot.LLM_MODEL_NAME}`\n"
-                f"📈 *Total Return:* `{total_return_pct:.2f}%`\n"
-                f"📉 *Max Drawdown:* `{(max_drawdown * 100) if max_drawdown is not None else 0:.2f}%`\n"
-                f"🛡️ *Sortino Ratio:* `{sortino if sortino is not None else 0:.2f}`\n\n"
-                f"💼 *Final Equity:* `${final_equity:.2f}`\n"
-                f"🔄 *Total Trades:* `{trade_stats['total_trades']}`\n"
-                f"✅ *Win Rate:* `{trade_stats['win_rate_pct'] if trade_stats['win_rate_pct'] is not None else 0:.1f}%`\n"
-            )
-            bot.send_telegram_message(msg)
-            logging.info("Sent backtest summary to Telegram.")
-        except Exception as exc:
-            logging.warning("Failed to send Telegram summary: %s", exc)
+    bot.send_session_summary(title="Backtest Complete")
 
 
 if __name__ == "__main__":

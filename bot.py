@@ -497,7 +497,7 @@ def init_csv_files() -> None:
             writer.writerow([
                 'timestamp', 'coin', 'action', 'side', 'quantity', 'price',
                 'profit_target', 'stop_loss', 'leverage', 'confidence',
-                'pnl', 'balance_after', 'reason'
+                'gross_pnl', 'fees', 'pnl', 'balance_after', 'reason'
             ])
     
     if not DECISIONS_CSV.exists():
@@ -573,6 +573,8 @@ def log_trade(coin: str, action: str, details: Dict[str, Any]) -> None:
             details.get('stop_loss', 0),
             details.get('leverage', 1),
             details.get('confidence', 0),
+            details.get('gross_pnl', 0),
+            details.get('fees', 0),
             details.get('pnl', 0),
             balance,
             details.get('reason', '')
@@ -653,14 +655,23 @@ def record_iteration_message(text: str) -> None:
     if current_iteration_messages is not None:
         current_iteration_messages.append(strip_ansi_codes(text).rstrip())
 
-def send_telegram_message(text: str, chat_id: Optional[str] = None, parse_mode: Optional[str] = "Markdown") -> None:
+import html
+
+def escape_html(text: str) -> str:
+    """Escape characters for Telegram HTML mode."""
+    return html.escape(str(text), quote=False)
+
+def send_telegram_message(text: str, chat_id: Optional[str] = None, parse_mode: Optional[str] = "HTML") -> None:
     """Send a notification message to Telegram if credentials are configured.
 
     If `chat_id` is provided it will be used; otherwise `TELEGRAM_CHAT_ID` is used.
     This allows sending different message types to a dedicated signals group (`TELEGRAM_SIGNALS_CHAT_ID`).
     """
-    effective_chat = (chat_id or TELEGRAM_CHAT_ID or "").strip()
-    if not TELEGRAM_BOT_TOKEN or not effective_chat:
+    effective_chat = (chat_id or "").strip()
+    if not effective_chat or effective_chat.lower().startswith("your_"):
+        effective_chat = (TELEGRAM_CHAT_ID or "").strip()
+    
+    if not TELEGRAM_BOT_TOKEN or not effective_chat or effective_chat.lower().startswith("your_"):
         return
 
     try:
@@ -681,15 +692,17 @@ def send_telegram_message(text: str, chat_id: Optional[str] = None, parse_mode: 
 
         response_text_lower = response.text.lower()
         logging.warning(
-            "Telegram notification failed (%s): %s",
+            "Telegram notification failed for chat %s (%s): %s",
+            effective_chat,
             response.status_code,
             response.text,
         )
         if (
             response.status_code == 400
-            and "can't parse entities" in response_text_lower
+            and ("can't parse entities" in response_text_lower or "bad request" in response_text_lower)
             and parse_mode
         ):
+            # Fallback to plain text on formatting errors
             fallback_payload = {
                 "chat_id": effective_chat,
                 "text": strip_ansi_codes(text),
@@ -831,6 +844,7 @@ def load_state() -> None:
 def save_state() -> None:
     """Persist current balance, open positions, and iteration counter."""
     try:
+        trade_stats = summarize_trades(TRADES_CSV)
         with open(STATE_JSON, "w", encoding='utf-8') as f:
             json.dump(
                 {
@@ -838,6 +852,7 @@ def save_state() -> None:
                     "positions": positions,
                     "iteration": iteration_counter,
                     "updated_at": get_current_time().isoformat(),
+                    "performance": trade_stats,
                 },
                 f,
                 indent=2,
@@ -886,6 +901,71 @@ def register_equity_snapshot(total_equity: float) -> None:
         return
     if isinstance(total_equity, (int, float, np.floating)) and np.isfinite(total_equity):
         equity_history.append(float(total_equity))
+
+# ───────────────────────── SMC INDICATORS ───────────────────
+
+def find_fvgs(df: pd.DataFrame, limit: int = 5) -> List[Dict[str, Any]]:
+    """Identify recent UNMITIGATED Fair Value Gaps (FVG)."""
+    fvgs = []
+    if len(df) < 3:
+        return fvgs
+        
+    for i in range(len(df) - 2):
+        # Bullish FVG (Gap Up)
+        if df['low'].iloc[i+2] > df['high'].iloc[i]:
+            top = float(df['low'].iloc[i+2])
+            bottom = float(df['high'].iloc[i])
+            # Check if mitigated by any later candle
+            is_mitigated = False
+            for j in range(i+3, len(df)):
+                if df['low'].iloc[j] <= bottom:
+                    is_mitigated = True
+                    break
+            if not is_mitigated:
+                fvgs.append({'type': 'bullish', 'top': top, 'bottom': bottom, 'size_pct': (top-bottom)/bottom*100})
+        
+        # Bearish FVG (Gap Down)
+        elif df['high'].iloc[i+2] < df['low'].iloc[i]:
+            top = float(df['low'].iloc[i])
+            bottom = float(df['high'].iloc[i+2])
+            # Check if mitigated
+            is_mitigated = False
+            for j in range(i+3, len(df)):
+                if df['high'].iloc[j] >= top:
+                    is_mitigated = True
+                    break
+            if not is_mitigated:
+                fvgs.append({'type': 'bearish', 'top': top, 'bottom': bottom, 'size_pct': (top-bottom)/top*100})
+    return fvgs[-limit:]
+
+def find_order_blocks(df: pd.DataFrame, limit: int = 3) -> List[Dict[str, Any]]:
+    """Identify recent Order Blocks (OB) based on candle engulfing and volume."""
+    obs = []
+    if len(df) < 5:
+        return obs
+        
+    for i in range(1, len(df) - 2):
+        # Bullish OB: Last bearish candle before a strong impulsive bullish move
+        if df['close'].iloc[i] < df['open'].iloc[i]: # Bearish candle
+            # Check if followed by a strong bullish move (e.g. engulfing or high volume)
+            if df['close'].iloc[i+1] > df['high'].iloc[i] and df['volume'].iloc[i+1] > df['volume'].iloc[i]:
+                obs.append({
+                    'type': 'bullish',
+                    'top': float(df['high'].iloc[i]),
+                    'bottom': float(df['low'].iloc[i]),
+                    'volume_spike': float(df['volume'].iloc[i+1] / df['volume'].iloc[i])
+                })
+        
+        # Bearish OB: Last bullish candle before a strong impulsive bearish move
+        elif df['close'].iloc[i] > df['open'].iloc[i]: # Bullish candle
+            if df['close'].iloc[i+1] < df['low'].iloc[i] and df['volume'].iloc[i+1] > df['volume'].iloc[i]:
+                obs.append({
+                    'type': 'bearish',
+                    'top': float(df['high'].iloc[i]),
+                    'bottom': float(df['low'].iloc[i]),
+                    'volume_spike': float(df['volume'].iloc[i+1] / df['volume'].iloc[i])
+                })
+    return obs[-limit:]
 
 # ───────────────────────── INDICATORS ───────────────────────
 
@@ -1225,6 +1305,16 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
         struct_tail = df_structure.tail(10)
         trend_tail = df_trend.tail(10)
 
+        # Identify FVGs and OBs
+        fvgs_exec = find_fvgs(df_execution)
+        obs_exec = find_order_blocks(df_execution)
+        
+        fvgs_struct = find_fvgs(df_structure)
+        obs_struct = find_order_blocks(df_structure)
+        
+        fvgs_trend = find_fvgs(df_trend)
+        obs_trend = find_order_blocks(df_trend)
+
         open_interest_latest = open_interest_values[-1] if open_interest_values else None
         open_interest_average = float(np.mean(open_interest_values)) if open_interest_values else None
 
@@ -1238,6 +1328,8 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
                 "macd": float(df_execution["macd"].iloc[-1]),
                 "macd_signal": float(df_execution["macd_signal"].iloc[-1]),
                 "atr": float(df_execution["atr"].iloc[-1]),
+                "fvgs": fvgs_exec,
+                "obs": obs_exec,
                 "series": {
                     "mid_prices": round_series(exec_tail["mid_price"], 3),
                     "ema20": round_series(exec_tail["ema20"], 3),
@@ -1256,6 +1348,8 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
                 "swing_low": float(df_structure["swing_low"].iloc[-1]),
                 "volume_ratio": float(df_structure["volume_ratio"].iloc[-1]),
                 "atr": float(df_structure["atr"].iloc[-1]),
+                "fvgs": fvgs_struct,
+                "obs": obs_struct,
                 "series": {
                     "close": round_series(struct_tail["close"], 3),
                     "ema20": round_series(struct_tail["ema20"], 3),
@@ -1276,6 +1370,8 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
                 "macd_signal": float(df_trend["macd_signal"].iloc[-1]),
                 "macd_histogram": float(df_trend["macd_histogram"].iloc[-1]),
                 "atr": float(df_trend["atr"].iloc[-1]),
+                "fvgs": fvgs_trend,
+                "obs": obs_trend,
                 "macd_histogram_avg": float(df_trend["macd_histogram_avg"].iloc[-1]) if not pd.isna(
                     df_trend["macd_histogram_avg"].iloc[-1]
                 ) else 0.0,
@@ -1374,8 +1470,6 @@ def format_prompt_for_deepseek() -> str:
     is_daily_only = (INTERVAL == "1d")
     
     for symbol in SYMBOLS:
-        coin = SYMBOL_TO_COIN[coin_entry] if 'coin_entry' in locals() else SYMBOL_TO_COIN.get(symbol, symbol)
-        # Fix: ensure we use the correct coin name from market_snapshots
         coin = SYMBOL_TO_COIN.get(symbol, symbol)
         data = market_snapshots.get(coin)
         if not data:
@@ -1406,6 +1500,14 @@ def format_prompt_for_deepseek() -> str:
                 macd_direction = "neutral"
             prompt_lines.append(f"    MACD Crossover: {macd_direction}")
 
+            if trend.get("fvgs"):
+                fvg_strs = [f"{f['type'].upper()} ({f['bottom']:.2f}-{f['top']:.2f})" for f in trend["fvgs"]]
+                prompt_lines.append(f"    Recent UNMITIGATED FVGs: {', '.join(fvg_strs)}")
+            
+            if trend.get("obs"):
+                ob_strs = [f"{o['type'].upper()} ({o['bottom']:.2f}-{o['top']:.2f}, vol x{o['volume_spike']:.1f})" for o in trend["obs"]]
+                prompt_lines.append(f"    Recent Order Blocks: {', '.join(ob_strs)}")
+
             prompt_lines.append(
                 f"    Trend Strength Score: {fmt(data.get('trend_strength'), 2)} "
                 f"(EMA {fmt(trend_components.get('ema_component'), 2)}, "
@@ -1435,6 +1537,15 @@ def format_prompt_for_deepseek() -> str:
             prompt_lines.append(f"    RSI14: {fmt(trend['rsi14'], 2)}")
             prompt_lines.append(f"    ATR14: {fmt(trend['atr'], 3)}")
             prompt_lines.append(f"    ADX14: {fmt(trend.get('adx'), 2)}")
+
+            if trend.get("fvgs"):
+                fvg_strs = [f"{f['type'].upper()} ({f['bottom']:.2f}-{f['top']:.2f})" for f in trend["fvgs"]]
+                prompt_lines.append(f"    Recent UNMITIGATED FVGs: {', '.join(fvg_strs)}")
+            
+            if trend.get("obs"):
+                ob_strs = [f"{o['type'].upper()} ({o['bottom']:.2f}-{o['top']:.2f}, vol x{o['volume_spike']:.1f})" for o in trend["obs"]]
+                prompt_lines.append(f"    Recent Order Blocks: {', '.join(ob_strs)}")
+
             prompt_lines.append(
                 f"    Trend Strength Score: {fmt(trend.get('trend_strength'), 2)} "
                 f"(EMA {fmt(trend_components.get('ema_component'), 2)}, "
@@ -1469,6 +1580,15 @@ def format_prompt_for_deepseek() -> str:
                 f"    MACD: {fmt(structure['macd'], 3)}, Signal: {fmt(structure['macd_signal'], 3)}"
             )
             prompt_lines.append(f"    ATR14: {fmt(structure['atr'], 3)}")
+
+            if structure.get("fvgs"):
+                fvg_strs = [f"{f['type'].upper()} ({f['bottom']:.2f}-{f['top']:.2f})" for f in structure["fvgs"]]
+                prompt_lines.append(f"    Recent UNMITIGATED FVGs: {', '.join(fvg_strs)}")
+            
+            if structure.get("obs"):
+                ob_strs = [f"{o['type'].upper()} ({o['bottom']:.2f}-{o['top']:.2f}, vol x{o['volume_spike']:.1f})" for o in structure["obs"]]
+                prompt_lines.append(f"    Recent Order Blocks: {', '.join(ob_strs)}")
+
             prompt_lines.append(f"    Volume Ratio: {fmt(structure['volume_ratio'], 2)}x (>1.5 = volume spike)")
             prompt_lines.append(
                 f"    1H Series (last 10): Close={json.dumps(structure['series']['close'])}"
@@ -1511,6 +1631,15 @@ def format_prompt_for_deepseek() -> str:
             )
             prompt_lines.append(f"    RSI Zone: {rsi_zone}")
             prompt_lines.append(f"    ATR14: {fmt(execution['atr'], 3)}")
+
+            if execution.get("fvgs"):
+                fvg_strs = [f"{f['type'].upper()} ({f['bottom']:.2f}-{f['top']:.2f})" for f in execution["fvgs"]]
+                prompt_lines.append(f"    Recent UNMITIGATED FVGs: {', '.join(fvg_strs)}")
+            
+            if execution.get("obs"):
+                ob_strs = [f"{o['type'].upper()} ({o['bottom']:.2f}-{o['top']:.2f}, vol x{o['volume_spike']:.1f})" for o in execution["obs"]]
+                prompt_lines.append(f"    Recent Order Blocks: {', '.join(ob_strs)}")
+
             prompt_lines.append(
                 f"    {INTERVAL.upper()} Series (last 10): Mid-Price={json.dumps(execution['series']['mid_prices'])}"
             )
@@ -1624,8 +1753,8 @@ Return ONLY valid JSON (no extra text). For each coin supply:
     "signal": "entry|hold|close",
     "side": "long|short",              // required for entry
     "quantity": 0.0,
-    "profit_target": 0.0,
-    "stop_loss": 0.0,
+    "profit_target": 650.5,            // MUST be a real calculated price level
+    "stop_loss": 580.2,               // MUST be a real calculated price level
     "leverage": 3,
     "confidence": 0.75,
     "risk_usd": 150.0,
@@ -1636,6 +1765,7 @@ Return ONLY valid JSON (no extra text). For each coin supply:
   }
 }
 Optional for partial closes: include "close_fraction" (0-1), "close_percent", or "close_quantity" for the amount to exit.
+CRITICAL: stop_loss and profit_target MUST be non-zero and valid price levels for any 'entry' signal.
 Do not include commentary outside the JSON response.
 """.strip()
     )
@@ -1957,8 +2087,10 @@ def calculate_total_equity() -> float:
         if not symbol:
             continue
         data = fetch_market_data(symbol)
-        if data:
-            total += calculate_unrealized_pnl(coin, data['price'])
+        if data and "price" in data:
+            price = data["price"]
+            if price is not None and np.isfinite(price):
+                total += calculate_unrealized_pnl(coin, price)
     
     return total
 
@@ -2004,6 +2136,293 @@ def calculate_sortino_ratio(
     if not np.isfinite(sortino):
         return None
     return float(sortino)
+
+
+def compute_max_drawdown(equity_values: Iterable[float]) -> Optional[float]:
+    values = np.array([v for v in equity_values if np.isfinite(v)], dtype=float)
+    if values.size < 2:
+        return None
+    peaks = np.maximum.accumulate(values)
+    drawdowns = (peaks - values) / peaks
+    return float(drawdowns.max()) if drawdowns.size else None
+
+
+def estimate_period_seconds(index: pd.Index, default: float = 180.0) -> float:
+    """Infer measurement cadence from a datetime-like index."""
+    if index.size < 2:
+        return default
+    try:
+        # Convert to series if it's not already, and compute diffs
+        series = pd.to_datetime(index.to_series(), format='ISO8601', utc=True)
+        diffs = series.diff().dropna()
+    except Exception:
+        return default
+    if diffs.empty:
+        return default
+    try:
+        period_seconds = diffs.dt.total_seconds().median()
+    except AttributeError:
+        period_seconds = default
+    if not period_seconds or not np.isfinite(period_seconds) or period_seconds <= 0:
+        return default
+    return float(period_seconds)
+
+
+def compute_sharpe_ratio(trades_df: pd.DataFrame) -> float | None:
+    """Compute annualized Sharpe ratio from realized (closed) trades."""
+    if trades_df.empty or "action" not in trades_df.columns:
+        return None
+
+    actions = trades_df["action"].astype(str).str.upper()
+    closes = trades_df.loc[actions == "CLOSE"].copy()
+    if closes.empty or "balance_after" not in closes.columns:
+        return None
+
+    closes.sort_values("timestamp", inplace=True)
+    closes["timestamp"] = pd.to_datetime(closes["timestamp"], format='ISO8601', utc=True)
+    closes = closes.set_index("timestamp")
+
+    balances = pd.to_numeric(closes["balance_after"], errors="coerce").dropna()
+    if balances.size < 2:
+        return None
+
+    returns = balances.pct_change().dropna()
+    if returns.empty:
+        return None
+
+    std = returns.std()
+    if std is None or np.isclose(std, 0.0):
+        return None
+
+    period_seconds = estimate_period_seconds(closes.index)
+
+    periods_per_year = (365 * 24 * 60 * 60) / period_seconds
+    sharpe = returns.mean() / std * np.sqrt(periods_per_year)
+    return float(sharpe) if np.isfinite(sharpe) else None
+
+
+def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
+    empty_stats = {
+        "total_trades": 0,
+        "closed_trades": 0,
+        "partial_closes": 0,
+        "close_events": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "breakeven_trades": 0,
+        "win_rate_pct": None,
+        "net_realized_pnl": 0.0,
+        "avg_win_pnl": None,
+        "avg_loss_pnl": None,
+        "profit_factor": None,
+        "avg_trade_pnl": None,
+        "gross_profit": 0.0,
+        "gross_loss": 0.0,
+        "avg_holding_time_seconds": None,
+        "max_consecutive_wins": 0,
+        "max_consecutive_losses": 0,
+        "current_consecutive_wins": 0,
+        "current_consecutive_losses": 0,
+    }
+
+    if not trades_path.exists():
+        return dict(empty_stats)
+
+    try:
+        df = pd.read_csv(trades_path)
+    except Exception as exc:  # pragma: no cover - defensive against bad CSVs
+        logging.warning("Unable to load trade history from %s: %s", trades_path, exc)
+        return dict(empty_stats)
+
+    if df.empty or "action" not in df:
+        return dict(empty_stats)
+
+    # 1. Calculate basic counts and PnL
+    actions = df["action"].astype(str).str.upper().str.strip()
+    entries_mask = actions == "ENTRY"
+    closes_mask = actions == "CLOSE"
+    partial_mask = actions == "CLOSE_PARTIAL"
+    close_events_mask = closes_mask | partial_mask
+
+    total_trades = int(entries_mask.sum())
+    full_closes = int(closes_mask.sum())
+    partial_closes = int(partial_mask.sum())
+
+    close_trades = df.loc[close_events_mask].copy()
+    if close_trades.empty:
+        return {
+            **empty_stats,
+            "total_trades": total_trades,
+            "closed_trades": full_closes,
+            "partial_closes": partial_closes,
+        }
+
+    close_trades["pnl"] = pd.to_numeric(close_trades["pnl"], errors="coerce")
+    close_trades["gross_pnl"] = pd.to_numeric(close_trades.get("gross_pnl", 0), errors="coerce")
+    close_trades["fees"] = pd.to_numeric(close_trades.get("fees", 0), errors="coerce")
+    close_trades = close_trades[np.isfinite(close_trades["pnl"])]
+
+    close_events = int(len(close_trades))
+    winning = int((close_trades["pnl"] > 0).sum())
+    losing = int((close_trades["pnl"] < 0).sum())
+    breakeven = int((close_trades["pnl"] == 0).sum())
+    win_rate = (winning / close_events) * 100 if close_events else None
+    net_realized = float(close_trades["pnl"].sum()) if close_events else 0.0
+    total_fees = float(close_trades["fees"].sum()) if "fees" in close_trades else 0.0
+    avg_trade = net_realized / close_events if close_events else None
+
+    # Gross Profit/Loss refers to the result of winning/losing trades before fees
+    wins_gross_mask = close_trades["gross_pnl"] > 0
+    losses_gross_mask = close_trades["gross_pnl"] < 0
+    gross_profit = float(close_trades.loc[wins_gross_mask, "gross_pnl"].sum())
+    gross_loss = float(-close_trades.loc[losses_gross_mask, "gross_pnl"].sum())
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
+
+    # Averages based on Net PnL
+    wins_net = close_trades.loc[close_trades["pnl"] > 0, "pnl"]
+    losses_net = close_trades.loc[close_trades["pnl"] < 0, "pnl"]
+    avg_win = float(wins_net.mean()) if not wins_net.empty else None
+    avg_loss = float(losses_net.mean()) if not losses_net.empty else None
+
+    # 2. Calculate Average Holding Time
+    # Match ENTRY with CLOSE/CLOSE_PARTIAL per coin
+    open_positions: Dict[str, datetime] = {}
+    holding_times: List[float] = []
+    
+    # Ensure timestamp is datetime
+    df["timestamp_dt"] = pd.to_datetime(df["timestamp"], format='mixed', utc=True)
+    
+    for _, row in df.sort_values("timestamp_dt").iterrows():
+        action = str(row["action"]).upper().strip()
+        coin = row["coin"]
+        ts = row["timestamp_dt"]
+        
+        if action == "ENTRY":
+            # If there's already an open position, we don't update (simplified FIFO)
+            if coin not in open_positions:
+                open_positions[coin] = ts
+        elif action in ("CLOSE", "CLOSE_PARTIAL"):
+            if coin in open_positions:
+                entry_ts = open_positions[coin]
+                duration = (ts - entry_ts).total_seconds()
+                holding_times.append(duration)
+                if action == "CLOSE":
+                    del open_positions[coin]
+
+    avg_holding_time = float(np.mean(holding_times)) if holding_times else None
+
+    # 3. Calculate Consecutive Streaks
+    close_trades = close_trades.sort_values("timestamp")
+    max_wins = 0
+    max_losses = 0
+    curr_wins = 0
+    curr_losses = 0
+    
+    for pnl in close_trades["pnl"]:
+        if pnl > 0:
+            curr_wins += 1
+            curr_losses = 0
+            max_wins = max(max_wins, curr_wins)
+        elif pnl < 0:
+            curr_losses += 1
+            curr_wins = 0
+            max_losses = max(max_losses, curr_losses)
+        else:
+            # Breakeven resets both streaks
+            curr_wins = 0
+            curr_losses = 0
+
+    return {
+        "total_trades": total_trades,
+        "closed_trades": full_closes,
+        "partial_closes": partial_closes,
+        "close_events": close_events,
+        "winning_trades": winning,
+        "losing_trades": losing,
+        "breakeven_trades": breakeven,
+        "win_rate_pct": float(win_rate) if win_rate is not None else None,
+        "net_realized_pnl": net_realized,
+        "avg_win_pnl": avg_win,
+        "avg_loss_pnl": avg_loss,
+        "gross_profit": gross_profit,
+        "gross_loss": gross_loss,
+        "profit_factor": profit_factor,
+        "avg_trade_pnl": avg_trade,
+        "avg_holding_time_seconds": avg_holding_time,
+        "max_consecutive_wins": max_wins,
+        "max_consecutive_losses": max_losses,
+        "current_consecutive_wins": curr_wins,
+        "current_consecutive_losses": curr_losses,
+    }
+
+
+def send_session_summary(title: str = "Trading Session Complete") -> None:
+    """Calculate and send a comprehensive performance summary to Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+
+    try:
+        final_equity = calculate_total_equity()
+        total_return_pct = ((final_equity - START_CAPITAL) / START_CAPITAL) * 100 if START_CAPITAL else 0.0
+        
+        # Calculate Sortino
+        interval_delta = CHECK_INTERVAL
+        sortino = calculate_sortino_ratio(equity_history, interval_delta, RISK_FREE_RATE)
+        
+        # Calculate Max Drawdown
+        max_drawdown = compute_max_drawdown(equity_history)
+        
+        # Load trades for Sharpe and Stats
+        trades_df = pd.DataFrame()
+        if TRADES_CSV.exists():
+            try:
+                trades_df = pd.read_csv(TRADES_CSV)
+            except Exception:
+                pass
+        
+        sharpe = compute_sharpe_ratio(trades_df)
+        trade_stats = summarize_trades(TRADES_CSV)
+        
+        recovery_factor = None
+        if max_drawdown is not None and max_drawdown > 0:
+            recovery_factor = total_return_pct / (max_drawdown * 100)
+
+        avg_holding = trade_stats.get('avg_holding_time_seconds')
+        if avg_holding is not None:
+            if avg_holding > 3600:
+                holding_str = f"{avg_holding/3600:.1f}h"
+            elif avg_holding > 60:
+                holding_str = f"{avg_holding/60:.1f}m"
+            else:
+                holding_str = f"{avg_holding:.0f}s"
+        else:
+            holding_str = "N/A"
+
+        msg = (
+            f"📊 <b>{title}</b>\n\n"
+            f"🚀 <b>Model:</b> <code>{LLM_MODEL_NAME}</code>\n"
+            f"💰 <b>Total Net Profit:</b> <code>${trade_stats['net_realized_pnl']:+.2f}</code>\n"
+            f"📈 <b>Profit Factor:</b> <code>{trade_stats['profit_factor'] if trade_stats['profit_factor'] is not None else 0:.2f}</code>\n"
+            f"📉 <b>Max Drawdown:</b> <code>{(max_drawdown * 100) if max_drawdown is not None else 0:.2f}%</code>\n"
+            f"🔄 <b>Recovery Factor:</b> <code>{recovery_factor if recovery_factor is not None else 0:.2f}</code>\n"
+            f"⚖️ <b>Sharpe:</b> <code>{sharpe if sharpe is not None else 0:.2f}</code> | <b>Sortino:</b> <code>{sortino if sortino is not None else 0:.2f}</code>\n\n"
+            f"✅ <b>Win Rate:</b> <code>{trade_stats['win_rate_pct'] if trade_stats['win_rate_pct'] is not None else 0:.1f}%</code>\n"
+            f"🏆 <b>Profit Trades:</b> <code>{trade_stats['winning_trades']}</code> ({(trade_stats['winning_trades']/trade_stats['close_events']*100) if trade_stats['close_events'] else 0:.1f}%)\n"
+            f"💀 <b>Loss Trades:</b> <code>{trade_stats['losing_trades']}</code> ({(trade_stats['losing_trades']/trade_stats['close_events']*100) if trade_stats['close_events'] else 0:.1f}%)\n"
+            f"🟢 <b>Gross Profit:</b> <code>${trade_stats['gross_profit']:.2f}</code>\n"
+            f"🔴 <b>Gross Loss:</b> <code>${trade_stats['gross_loss']:.2f}</code>\n\n"
+            f"🔥 <b>Streaks:</b> <code>{trade_stats['max_consecutive_wins']}W / {trade_stats['max_consecutive_losses']}L</code>\n"
+            f"🕒 <b>Avg Holding:</b> <code>{holding_str}</code>\n"
+            f"💼 <b>Final Balance:</b> <code>${balance:.2f}</code>\n"
+            f"🏛️ <b>Final Equity:</b> <code>${final_equity:.2f}</code>"
+        )
+        
+        send_telegram_message(msg, parse_mode="HTML")
+        logging.info("Sent session summary to Telegram.")
+    except Exception as exc:
+        logging.error("Failed to generate/send session summary: %s", exc, exc_info=True)
+
+
 
 def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> None:
     """Execute entry trade."""
@@ -2250,7 +2669,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     record_iteration_message(line)
     reason_text = raw_reason or "No justification provided."
     reason_text = " ".join(reason_text.split())
-    reason_text_for_signal = escape_markdown(reason_text)
+    reason_text_for_signal = escape_html(reason_text)
 
     line = (
         f"  ├─ PnL @ Target: ${gross_at_target:+.2f} "
@@ -2303,34 +2722,36 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         side_emoji = "🟢" if side.lower() == "long" else "🔴"
         
         signal_text = (
-            f"{side_emoji} *ENTRY SIGNAL* {side_emoji}\n"
+            f"{side_emoji} <b>ENTRY SIGNAL</b> {side_emoji}\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
-            f"*Asset:* `{coin}`\n"
-            f"*Direction:* {side.upper()} {leverage_display}\n"
-            f"*Entry Price:* `${entry_price:.4f}`\n"
+            f"<b>Asset:</b> <code>{coin}</code>\n"
+            f"<b>Direction:</b> {side.upper()} {leverage_display}\n"
+            f"<b>Entry Price:</b> <code>${entry_price:.4f}</code>\n"
             f"\n"
-            f"📊 *Position Details*\n"
-            f"• Size: `{quantity:.4f} {coin}`\n"
-            f"• Margin: `${margin_required:.2f}`\n"
-            f"• Risk: `${risk_usd:.2f}`\n"
+            f"📊 <b>Position Details</b>\n"
+            f"• Size: <code>{quantity:.4f} {coin}</code>\n"
+            f"• Margin: <code>${margin_required:.2f}</code>\n"
+            f"• Risk: <code>${risk_usd:.2f}</code>\n"
             f"\n"
-            f"🎯 *Targets & Stops*\n"
-            f"• Target: `${profit_target_price:.4f}` ({'+' if gross_at_target >= 0 else ''}`${gross_at_target:.2f}`)\n"
-            f"• Stop Loss: `${stop_loss_price:.4f}` (`${gross_at_stop:.2f}`)\n"
-            f"• R/R Ratio: `{rr_display}`\n"
+            f"🎯 <b>Targets & Stops</b>\n"
+            f"• Target: <code>${profit_target_price:.4f}</code> ({'+' if gross_at_target >= 0 else ''}<code>${gross_at_target:.2f}</code>)\n"
+            f"• Stop Loss: <code>${stop_loss_price:.4f}</code> (<code>${gross_at_stop:.2f}</code>)\n"
+            f"• R/R Ratio: <code>{rr_display}</code>\n"
             f"\n"
-            f"⚙️ *Execution*\n"
-            f"• Liquidity: `{liquidity}`\n"
-            f"• Confidence: `{confidence_pct:.0f}%`\n"
-            f"• Entry Fee: `${entry_fee:.2f}`\n"
+            f"⚙️ <b>Execution</b>\n"
+            f"• Liquidity: <code>{liquidity}</code>\n"
+            f"• Confidence: <code>{confidence_pct:.0f}%</code>\n"
+            f"• Entry Fee: <code>${entry_fee:.2f}</code>\n"
             f"\n"
-            f"💭 *Reasoning*\n"
-            f"_{reason_text_for_signal}_\n"
+            f"💭 <b>Reasoning</b>\n"
+            f"<i>{reason_text_for_signal}</i>\n"
             f"━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 <b>Balance After:</b> <code>${balance:.2f}</code>\n"
             f"🕐 {get_current_time().strftime('%Y-%m-%d %H:%M:%S UTC')}"
-        )
+            )
+
         # If TELEGRAM_SIGNALS_CHAT_ID is set, prefer it; otherwise fall back to TELEGRAM_CHAT_ID
-        send_telegram_message(signal_text, chat_id=TELEGRAM_SIGNALS_CHAT_ID, parse_mode="Markdown")
+        send_telegram_message(signal_text, chat_id=TELEGRAM_SIGNALS_CHAT_ID, parse_mode="HTML")
     except Exception as exc:
         # Keep trading even if notifications fail
         logging.debug("Failed to send ENTRY signal to Telegram (non-fatal): %s", exc)
@@ -2345,6 +2766,8 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         'confidence': decision.get('confidence', 0),
         'trade_type': trade_type,
         'phase': trail_phase,
+        'gross_pnl': 0,
+        'fees': entry_fee,
         'pnl': 0,
         'reason': f"{reason_text or 'AI entry signal'} | {trade_type} {trail_phase} | Fees: ${entry_fee:.2f}"
     })
@@ -2413,7 +2836,7 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
     raw_reason = str(decision.get("justification", "")).strip()
     reason_text = raw_reason or pos.get("last_justification") or "AI close signal"
     reason_text = " ".join(reason_text.split())
-    reason_text_for_signal = escape_markdown(reason_text)
+    reason_text_for_signal = escape_html(reason_text)
 
     side = str(pos.get("side", "long")).lower()
     entry_price = float(pos.get("entry_price", 0.0))
@@ -2510,9 +2933,9 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
         result_label = "LOSS"
 
     header = (
-        f"{result_emoji} *PARTIAL CLOSE SIGNAL - {result_label}* {result_emoji}"
+        f"{result_emoji} <b>PARTIAL CLOSE SIGNAL - {result_label}</b> {result_emoji}"
         if is_partial
-        else f"{result_emoji} *CLOSE SIGNAL - {result_label}* {result_emoji}"
+        else f"{result_emoji} <b>CLOSE SIGNAL - {result_label}</b> {result_emoji}"
     )
 
     price_change_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price else 0.0
@@ -2524,30 +2947,31 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
     telegram_message = (
         f"{header}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"*Asset:* `{coin}`\n"
-        f"*Direction:* {pos['side'].upper()}\n"
-        f"*Closed Size:* `{close_quantity:.4f} {coin}`\n"
-        f"*Entry:* `${entry_price:.4f}`\n"
-        f"*Exit:* `${current_price:.4f}` ({price_change_sign}{price_change_pct:.2f}%)\n"
+        f"<b>Asset:</b> <code>{coin}</code>\n"
+        f"<b>Direction:</b> {pos['side'].upper()}\n"
+        f"<b>Closed Size:</b> <code>{close_quantity:.4f} {coin}</code>\n"
+        f"<b>Entry:</b> <code>${entry_price:.4f}</code>\n"
+        f"<b>Exit:</b> <code>${current_price:.4f}</code> ({price_change_sign}{price_change_pct:.2f}%)\n"
         f"\n"
-        f"💰 *P&L Summary*\n"
-        f"• Gross: `${gross_pnl:.2f}`\n"
-        f"• Fees (entry share + exit): `${total_fees:.2f}`\n"
-        f"• *Net:* `{net_pnl:+.2f}`\n"
-        f"• ROI on released margin: `{roi_sign}{roi_pct:.1f}%`\n"
+        f"💰 <b>P&L Summary</b>\n"
+        f"• Gross: <code>${gross_pnl:.2f}</code>\n"
+        f"• Fees (entry share + exit): <code>${total_fees:.2f}</code>\n"
+        f"• <b>Net:</b> <code>{net_pnl:+.2f}</code>\n"
+        f"• ROI on released margin: <code>{roi_sign}{roi_pct:.1f}%</code>\n"
     )
     if is_partial:
         telegram_message += (
             f"\n"
-            f"📉 *Position Remainder*\n"
-            f"• Remaining Size: `{remaining_quantity:.4f} {coin}`\n"
-            f"• Remaining Margin: `${remaining_margin:.2f}`\n"
+            f"📉 <b>Position Remainder</b>\n"
+            f"• Remaining Size: <code>{remaining_quantity:.4f} {coin}</code>\n"
+            f"• Remaining Margin: <code>${remaining_margin:.2f}</code>\n"
         )
     telegram_message += (
         f"\n"
-        f"💭 *Reasoning*\n"
-        f"_{reason_text_for_signal}_\n"
+        f"💭 <b>Reasoning</b>\n"
+        f"<i>{reason_text_for_signal}</i>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💰 <b>Balance After:</b> <code>${balance:.2f}</code>\n"
         f"🕐 {get_current_time().strftime('%Y-%m-%d %H:%M:%S UTC')}"
     )
 
@@ -2555,7 +2979,7 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
         send_telegram_message(
             telegram_message,
             chat_id=TELEGRAM_SIGNALS_CHAT_ID,
-            parse_mode="Markdown",
+            parse_mode="HTML",
         )
     except Exception as exc:
         logging.debug("Failed to send CLOSE signal to Telegram (non-fatal): %s", exc)
@@ -2578,6 +3002,8 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
             "stop_loss": 0,
             "leverage": leverage_value,
             "confidence": 0,
+            "gross_pnl": gross_pnl,
+            "fees": total_fees,
             "pnl": net_pnl,
             "reason": log_reason,
         },
@@ -2637,6 +3063,14 @@ def process_ai_decisions(decisions: Dict[str, Any]) -> None:
         elif signal == "close":
             execute_close(coin, decision, current_price)
         elif signal == "hold":
+            reason_text = decision.get("justification", "No justification provided.")
+            line = f"  ├─ AI Decision for {coin}: HOLD"
+            print(line)
+            record_iteration_message(line)
+            line = f"  └─ Reason: {reason_text}"
+            print(line)
+            record_iteration_message(line)
+            
             if coin not in positions:
                 continue
             pos = positions[coin]
@@ -2969,6 +3403,11 @@ def main() -> None:
             total_margin = calculate_total_margin()
             net_unrealized_total = total_equity - balance - total_margin
             net_color = Fore.GREEN if net_unrealized_total >= 0 else Fore.RED
+            
+            trade_stats = summarize_trades(TRADES_CSV)
+            realized_pnl = trade_stats.get('net_realized_pnl', 0.0)
+            realized_color = Fore.GREEN if realized_pnl >= 0 else Fore.RED
+
             register_equity_snapshot(total_equity)
             sortino_ratio = calculate_sortino_ratio(
                 equity_history,
@@ -2993,6 +3432,9 @@ def main() -> None:
                 print(line)
                 record_iteration_message(line)
             line = f"Total Equity: {equity_color}${total_equity:.2f} ({total_return:+.2f}%){Style.RESET_ALL}"
+            print(line)
+            record_iteration_message(line)
+            line = f"Realized PnL: {realized_color}${realized_pnl:+.2f}{Style.RESET_ALL}"
             print(line)
             record_iteration_message(line)
             line = f"Unrealized PnL: {net_color}${net_unrealized_total:.2f}{Style.RESET_ALL}"
@@ -3026,6 +3468,7 @@ def main() -> None:
         except KeyboardInterrupt:
             print("\n\nShutting down bot...")
             save_state()
+            send_session_summary(title="Trading Session Interrupted")
             break
         except Exception as e:
             logging.error(f"Error in main loop: {e}", exc_info=True)
