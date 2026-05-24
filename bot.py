@@ -468,21 +468,46 @@ def init_csv_files() -> None:
                     df = pd.DataFrame(columns=STATE_COLUMNS)
                 df.to_csv(STATE_CSV, index=False, encoding='utf-8')
     
+    TRADES_COLUMNS = [
+        'timestamp', 'coin', 'action', 'side', 'quantity', 'price',
+        'profit_target', 'stop_loss', 'leverage', 'confidence',
+        'pnl', 'balance_after', 'reason', 'confluence_tags', 'trigger_tags', 'reasoning_categories'
+    ]
     if not TRADES_CSV.exists():
         with open(TRADES_CSV, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow([
-                'timestamp', 'coin', 'action', 'side', 'quantity', 'price',
-                'profit_target', 'stop_loss', 'leverage', 'confidence',
-                'pnl', 'balance_after', 'reason'
-            ])
+            writer.writerow(TRADES_COLUMNS)
+    else:
+        try:
+            df = pd.read_csv(TRADES_CSV, encoding='utf-8')
+            if list(df.columns) != TRADES_COLUMNS:
+                for col in TRADES_COLUMNS:
+                    if col not in df.columns:
+                        df[col] = ""
+                df = df[TRADES_COLUMNS]
+                df.to_csv(TRADES_CSV, index=False, encoding='utf-8')
+        except Exception as exc:
+            logging.warning("Unable to migrate %s schema: %s", TRADES_CSV, exc)
     
+    DECISIONS_COLUMNS = [
+        'timestamp', 'coin', 'signal', 'reasoning', 'confidence',
+        'confluence_tags', 'trigger_tags', 'reasoning_categories'
+    ]
     if not DECISIONS_CSV.exists():
         with open(DECISIONS_CSV, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow([
-                'timestamp', 'coin', 'signal', 'reasoning', 'confidence'
-            ])
+            writer.writerow(DECISIONS_COLUMNS)
+    else:
+        try:
+            df = pd.read_csv(DECISIONS_CSV, encoding='utf-8')
+            if list(df.columns) != DECISIONS_COLUMNS:
+                for col in DECISIONS_COLUMNS:
+                    if col not in df.columns:
+                        df[col] = ""
+                df = df[DECISIONS_COLUMNS]
+                df.to_csv(DECISIONS_CSV, index=False, encoding='utf-8')
+        except Exception as exc:
+            logging.warning("Unable to migrate %s schema: %s", DECISIONS_CSV, exc)
 
     if not MESSAGES_CSV.exists():
         with open(MESSAGES_CSV, 'w', newline='', encoding='utf-8') as f:
@@ -552,10 +577,13 @@ def log_trade(coin: str, action: str, details: Dict[str, Any]) -> None:
             details.get('confidence', 0),
             details.get('pnl', 0),
             balance,
-            details.get('reason', '')
+            details.get('reason', ''),
+            details.get('confluence_tags', ''),
+            details.get('trigger_tags', ''),
+            details.get('reasoning_categories', '')
         ])
 
-def log_ai_decision(coin: str, signal: str, reasoning: str, confidence: float) -> None:
+def log_ai_decision(coin: str, signal: str, reasoning: str, confidence: float, confluence_tags: str = '', trigger_tags: str = '', reasoning_categories: str = '') -> None:
     """Log AI decision."""
     with open(DECISIONS_CSV, 'a', newline='', encoding='utf-8') as f:
         writer = csv.writer(f)
@@ -564,7 +592,10 @@ def log_ai_decision(coin: str, signal: str, reasoning: str, confidence: float) -
             coin,
             signal,
             reasoning,
-            confidence
+            confidence,
+            confluence_tags,
+            trigger_tags,
+            reasoning_categories
         ])
 
 
@@ -596,7 +627,7 @@ def record_iteration_message(text: str) -> None:
     if current_iteration_messages is not None:
         current_iteration_messages.append(strip_ansi_codes(text).rstrip())
 
-def send_telegram_message(text: str, chat_id: Optional[str] = None, parse_mode: Optional[str] = "Markdown") -> None:
+def send_telegram_message(text: str, chat_id: Optional[str] = None, parse_mode: Optional[str] = None) -> None:
     """Send a notification message to Telegram if credentials are configured.
 
     If `chat_id` is provided it will be used; otherwise `TELEGRAM_CHAT_ID` is used.
@@ -774,11 +805,35 @@ def load_state() -> None:
 def save_state() -> None:
     """Persist current balance, open positions, and iteration counter."""
     try:
+        # Calculate performance metrics for the state file
+        trade_stats = summarize_trades(TRADES_CSV)
+        total_equity = calculate_total_equity()
+        total_net_profit = total_equity - START_CAPITAL
+        mdd = calculate_max_drawdown(equity_history)
+        
+        recovery_factor = 0.0
+        if mdd is not None and mdd > 0:
+            max_dd_amount = START_CAPITAL * mdd
+            recovery_factor = total_net_profit / max_dd_amount if max_dd_amount > 0 else 0.0
+
+        performance = {
+            "total_net_profit": total_net_profit,
+            "total_return_pct": (total_net_profit / START_CAPITAL * 100) if START_CAPITAL else 0.0,
+            "max_drawdown_pct": (mdd * 100) if mdd is not None else 0.0,
+            "recovery_factor": recovery_factor,
+            "profit_factor": trade_stats.get("profit_factor"),
+            "win_rate_pct": trade_stats.get("win_rate_pct"),
+            "total_trades": trade_stats.get("total_trades"),
+            "winning_trades": trade_stats.get("winning_trades"),
+            "losing_trades": trade_stats.get("losing_trades"),
+        }
+
         with open(STATE_JSON, "w", encoding='utf-8') as f:
             json.dump(
                 {
                     "balance": balance,
                     "positions": positions,
+                    "performance": performance,
                     "iteration": iteration_counter,
                     "updated_at": get_current_time().isoformat(),
                 },
@@ -937,6 +992,7 @@ def calculate_indicators(df: pd.DataFrame) -> pd.Series:
         macd_params=(MACD_FAST, MACD_SLOW, MACD_SIGNAL),
     )
     enriched["rsi"] = enriched[f"rsi{RSI_LEN}"]
+    enriched["atr"] = calculate_atr_series(enriched, 14)
     return enriched.iloc[-1]
 
 def fetch_market_data(symbol: str) -> Optional[Dict[str, Any]]:
@@ -1000,6 +1056,7 @@ def fetch_market_data(symbol: str) -> Optional[Dict[str, Any]]:
             "macd": last["macd"],
             "macd_signal": last["macd_signal"],
             "funding_rate": funding_rate,
+            "atr": last["atr"] if "atr" in last else 0.0,
         }
     except Exception as e:
         logging.error(f"Error fetching data for {symbol}: {e}")
@@ -1062,6 +1119,10 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
             macd_params=(MACD_FAST, MACD_SLOW, MACD_SIGNAL),
         )
         df_execution["atr"] = calculate_atr_series(df_execution, 14)
+        df_execution["atr_long"] = calculate_atr_series(df_execution, 100)
+        latest_atr = float(df_execution["atr"].iloc[-1])
+        latest_atr_long = float(df_execution["atr_long"].iloc[-1]) if not pd.isna(df_execution["atr_long"].iloc[-1]) else 0.0
+        volatility_ratio = latest_atr / latest_atr_long if latest_atr_long > 0 else 1.0
 
         structure_klines = binance_client.get_klines(symbol=symbol, interval="1h", limit=100)
         df_structure = pd.DataFrame(
@@ -1249,6 +1310,7 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
                 "rsi_component": float(rsi_component),
                 "adx_component": float(adx_component),
             },
+            "volatility_ratio": float(volatility_ratio),
         }
     except Exception as exc:
         logging.error("Failed to build market snapshot for %s: %s", symbol, exc, exc_info=True)
@@ -1299,6 +1361,9 @@ def format_trading_prompt() -> str:
             pass
         return f"{value:.6g}"
 
+    weekly_dd = calculate_weekly_drawdown()
+    drawdown_protection_active = weekly_dd >= 0.03
+
     prompt_lines: List[str] = []
     prompt_lines.append(
         f"It has been {minutes_running} minutes since you started trading. "
@@ -1310,6 +1375,10 @@ def format_trading_prompt() -> str:
     prompt_lines.append(
         f"Timeframe note: Execution uses {INTERVAL} candles, Structure uses 1h candles, Trend uses 4h candles."
     )
+    prompt_lines.append("-" * 80)
+    prompt_lines.append("GLOBAL RISK & VOLATILITY CONTROLS")
+    prompt_lines.append(f"- Current Weekly Drawdown: {weekly_dd * 100:.2f}%")
+    prompt_lines.append(f"- Drawdown Protection Status: {'ACTIVE (Pause Entries - Red Zone Mode)' if drawdown_protection_active else 'INACTIVE'}")
     prompt_lines.append("-" * 80)
     prompt_lines.append("CURRENT MARKET STATE FOR ALL COINS (Multi-Timeframe Analysis)")
 
@@ -1330,8 +1399,18 @@ def format_trading_prompt() -> str:
         funding_rates = data.get("funding_rates", [])
         funding_avg_str = fmt_rate(float(np.mean(funding_rates))) if funding_rates else "N/A"
         
+        vr = data.get("volatility_ratio", 1.0)
+        if vr < 1.6:
+            vr_zone = "ACTIVE (Green Zone - High Frequency, Normal Risk)"
+        elif vr <= 2.2:
+            vr_zone = "DEFENSIVE (Yellow Zone - Moderate Frequency, 50% Reduced Position Size/Risk)"
+        else:
+            vr_zone = "PAUSE (Red Zone - Zero Frequency, Pause Entries)"
+
         prompt_lines.append(f"\n{coin} MARKET SNAPSHOT")
         prompt_lines.append(f"Current Price: {fmt(data['price'], 3)}")
+        prompt_lines.append(f"  Volatility Ratio (VR): {fmt(vr, 2)}")
+        prompt_lines.append(f"  Volatility Zone: {vr_zone}")
         
         if is_daily_only:
             # Optimized 1D prompt: Skip redundant timeframe labels
@@ -1594,7 +1673,10 @@ Return ONLY valid JSON (no extra text). For each coin supply:
     "invalidation_condition": "1H close below 1080",
     "trade_type": "TYPE A|TYPE B|TYPE C",
     "phase": "Phase 1|Phase 2|Phase 3|Phase 4",
-    "justification": "Concise multi-timeframe reasoning with rule references."
+    "justification": "Concise multi-timeframe reasoning with rule references.",
+    "confluence_tags": ["EMA_crossover", "RSI_oversold", "Volatility_spike"], // List of key confluences matched
+    "trigger_tags": ["indicator_crossover", "support_bounce", "breakout"], // Trigger types
+    "reasoning_categories": ["trend_following", "mean_reversion", "breakout"] // Analytical categories
   }
 }
 Optional for partial closes: include "close_fraction" (0-1), "close_percent", or "close_quantity" for the amount to exit.
@@ -2028,6 +2110,188 @@ def calculate_sharpe_ratio(
         return None
     return float(sharpe)
 
+def calculate_max_drawdown(equity_values: Iterable[float]) -> Optional[float]:
+    """Compute the maximum drawdown as a decimal percentage (e.g., 0.1 for 10%)."""
+    values = np.array([float(v) for v in equity_values if np.isfinite(v)], dtype=float)
+    if values.size < 2:
+        return None
+    peaks = np.maximum.accumulate(values)
+    # Avoid division by zero
+    valid_peaks = np.where(peaks > 0, peaks, np.nan)
+    drawdowns = (peaks - values) / valid_peaks
+    mdd = float(np.nanmax(drawdowns)) if not np.all(np.isnan(drawdowns)) else 0.0
+    return mdd
+
+def calculate_weekly_drawdown() -> float:
+    """Compute rolling drawdown over the last 7 items in equity_history (representing a week)."""
+    if len(equity_history) < 2:
+        return 0.0
+    lookback = min(7, len(equity_history))
+    recent_equity = equity_history[-lookback:]
+    max_recent = max(recent_equity)
+    current = recent_equity[-1]
+    if max_recent <= 0:
+        return 0.0
+    dd = (max_recent - current) / max_recent
+    return max(dd, 0.0)
+
+def summarize_trades(trades_path: Path) -> Dict[str, Any]:
+    """Calculate aggregate trade statistics from a trade history CSV."""
+    empty_stats = {
+        "total_trades": 0,
+        "closed_trades": 0,
+        "partial_closes": 0,
+        "close_events": 0,
+        "winning_trades": 0,
+        "losing_trades": 0,
+        "breakeven_trades": 0,
+        "win_rate_pct": 0.0,
+        "net_realized_pnl": 0.0,
+        "gross_win": 0.0,
+        "gross_loss": 0.0,
+        "profit_factor": None,
+        "avg_trade_pnl": None,
+        "avg_holding_time_seconds": None,
+        "max_consecutive_wins": 0,
+        "max_consecutive_losses": 0,
+    }
+
+    if not trades_path.exists():
+        return dict(empty_stats)
+
+    try:
+        df = pd.read_csv(trades_path)
+    except Exception as exc:
+        logging.warning("Unable to load trade history from %s: %s", trades_path, exc)
+        return dict(empty_stats)
+
+    if df.empty or "action" not in df:
+        return dict(empty_stats)
+
+    # Calculate holding time and consecutive streaks
+    holding_times = []
+    open_positions_track: Dict[str, List[Dict[str, Any]]] = {}
+    
+    # Sort by timestamp to ensure chronological processing
+    try:
+        df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
+    except Exception:
+        return dict(empty_stats)
+        
+    df = df.sort_values("timestamp_dt")
+    
+    max_consecutive_wins = 0
+    max_consecutive_losses = 0
+    current_streak_type = None # 'win' or 'loss'
+    current_streak_count = 0
+
+    actions = df["action"].astype(str).str.upper().str.strip()
+    
+    for _, row in df.iterrows():
+        coin = row["coin"]
+        action = str(row["action"]).upper()
+        ts = row["timestamp_dt"]
+        
+        if action == "ENTRY":
+            if coin not in open_positions_track:
+                open_positions_track[coin] = []
+            open_positions_track[coin].append({"ts": ts, "qty": float(row["quantity"])})
+        elif action in ["CLOSE", "CLOSE_PARTIAL"]:
+            close_qty = float(row["quantity"])
+            pnl = float(row.get("pnl", 0))
+            
+            # Match with entries (FIFO) to calculate holding time
+            if coin in open_positions_track:
+                while close_qty > 0 and open_positions_track[coin]:
+                    entry = open_positions_track[coin][0]
+                    if entry["qty"] <= close_qty + 1e-8:
+                        # Full entry closed
+                        duration = (ts - entry["ts"]).total_seconds()
+                        holding_times.append(duration)
+                        close_qty -= entry["qty"]
+                        open_positions_track[coin].pop(0)
+                    else:
+                        # Partial entry closed
+                        duration = (ts - entry["ts"]).total_seconds()
+                        holding_times.append(duration)
+                        entry["qty"] -= close_qty
+                        close_qty = 0
+            
+            # Streak calculation
+            if pnl > 0:
+                if current_streak_type == 'win':
+                    current_streak_count += 1
+                else:
+                    current_streak_type = 'win'
+                    current_streak_count = 1
+                max_consecutive_wins = max(max_consecutive_wins, current_streak_count)
+            elif pnl < 0:
+                if current_streak_type == 'loss':
+                    current_streak_count += 1
+                else:
+                    current_streak_type = 'loss'
+                    current_streak_count = 1
+                max_consecutive_losses = max(max_consecutive_losses, current_streak_count)
+            elif pnl == 0:
+                current_streak_type = None
+                current_streak_count = 0
+
+    entries_mask = actions == "ENTRY"
+    closes_mask = actions == "CLOSE"
+    partial_mask = actions == "CLOSE_PARTIAL"
+    close_events_mask = closes_mask | partial_mask
+
+    total_trades_count = int(entries_mask.sum())
+    full_closes = int(closes_mask.sum())
+    partial_closes = int(partial_mask.sum())
+
+    close_trades = df.loc[close_events_mask].copy()
+    if close_trades.empty:
+        return {
+            **empty_stats,
+            "total_trades": total_trades_count,
+            "closed_trades": full_closes,
+            "partial_closes": partial_closes,
+        }
+
+    close_trades["pnl"] = pd.to_numeric(close_trades.get("pnl", 0), errors="coerce")
+    close_trades = close_trades[np.isfinite(close_trades["pnl"])]
+
+    close_events = int(len(close_trades))
+    winning = int((close_trades["pnl"] > 0).sum())
+    losing = int((close_trades["pnl"] < 0).sum())
+    breakeven = int((close_trades["pnl"] == 0).sum())
+    win_rate = (winning / close_events) * 100 if close_events else 0.0
+    net_realized = float(close_trades["pnl"].sum()) if close_events else 0.0
+    avg_trade = net_realized / close_events if close_events else None
+
+    wins = close_trades[close_trades["pnl"] > 0]["pnl"]
+    losses = close_trades[close_trades["pnl"] < 0]["pnl"]
+    gross_profit = float(wins.sum()) if not wins.empty else 0.0
+    gross_loss = float(-losses.sum()) if not losses.empty else 0.0
+    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
+    
+    avg_holding_time = float(np.mean(holding_times)) if holding_times else None
+
+    return {
+        "total_trades": total_trades_count,
+        "closed_trades": full_closes,
+        "partial_closes": partial_closes,
+        "close_events": close_events,
+        "winning_trades": winning,
+        "losing_trades": losing,
+        "breakeven_trades": breakeven,
+        "win_rate_pct": float(win_rate),
+        "net_realized_pnl": net_realized,
+        "gross_win": gross_profit,
+        "gross_loss": gross_loss,
+        "profit_factor": profit_factor,
+        "avg_trade_pnl": avg_trade,
+        "avg_holding_time_seconds": avg_holding_time,
+        "max_consecutive_wins": max_consecutive_wins,
+        "max_consecutive_losses": max_consecutive_losses,
+    }
+
 def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> None:
     """Execute entry trade."""
     global balance
@@ -2056,6 +2320,26 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
                 reason_text_compact,
             )
             return
+
+    # Calculate slippage/spread for backtesting
+    is_backtest = os.getenv("BACKTEST_RUN_ID") is not None
+    symbol = COIN_TO_SYMBOL.get(coin)
+    entry_price = current_price
+    if is_backtest and symbol:
+        slippage_factor = float(os.getenv("BACKTEST_SLIPPAGE_FACTOR", "0.1"))
+        spread_pct = float(os.getenv("BACKTEST_SPREAD_PCT", "0.0002"))
+        data = fetch_market_data(symbol)
+        atr = data.get("atr", 0.0) if data else 0.0
+        slippage = slippage_factor * atr
+        spread = current_price * spread_pct
+        if side == 'long':
+            entry_price = current_price + slippage + 0.5 * spread
+        else:
+            entry_price = current_price - slippage - 0.5 * spread
+        logging.info(
+            f"{coin}: Slippage/spread applied. Raw: {current_price:.4f} -> Slipped Entry: {entry_price:.4f} "
+            f"(Slippage: {slippage:.4f}, Spread: {spread:.4f})"
+        )
 
     leverage_raw = decision.get('leverage', 10)
     try:
@@ -2098,42 +2382,42 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         return
     
     if side == 'long':
-        if stop_loss_price >= current_price:
+        if stop_loss_price >= entry_price:
             logging.warning(
-                "%s: Stop loss %s not below current price %s for long; skipping entry.",
+                "%s: Stop loss %s not below entry price %s for long; skipping entry.",
                 coin,
                 stop_loss_price,
-                current_price,
+                entry_price,
             )
             return
-        if profit_target_price <= current_price:
+        if profit_target_price <= entry_price:
             logging.warning(
-                "%s: Profit target %s not above current price %s for long; skipping entry.",
+                "%s: Profit target %s not above entry price %s for long; skipping entry.",
                 coin,
                 profit_target_price,
-                current_price,
+                entry_price,
             )
             return
     elif side == 'short':
-        if stop_loss_price <= current_price:
+        if stop_loss_price <= entry_price:
             logging.warning(
-                "%s: Stop loss %s not above current price %s for short; skipping entry.",
+                "%s: Stop loss %s not above entry price %s for short; skipping entry.",
                 coin,
                 stop_loss_price,
-                current_price,
+                entry_price,
             )
             return
-        if profit_target_price >= current_price:
+        if profit_target_price >= entry_price:
             logging.warning(
-                "%s: Profit target %s not below current price %s for short; skipping entry.",
+                "%s: Profit target %s not below entry price %s for short; skipping entry.",
                 coin,
                 profit_target_price,
-                current_price,
+                entry_price,
             )
             return
     
     # Calculate position size based on risk
-    stop_distance = abs(current_price - stop_loss_price)
+    stop_distance = abs(entry_price - stop_loss_price)
     if not np.isfinite(stop_distance) or stop_distance <= 0:
         logging.warning(f"{coin}: Invalid stop loss distance; skipping entry.")
         return
@@ -2148,7 +2432,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         )
         return
 
-    position_value = quantity * current_price
+    position_value = quantity * entry_price
     margin_required = position_value / leverage if leverage else position_value
     
     liquidity = str(decision.get('liquidity', 'taker')).lower()
@@ -2177,7 +2461,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
             coin=coin,
             side=side,
             size=quantity,
-            entry_price=current_price,
+            entry_price=entry_price,
             stop_loss_price=stop_loss_price,
             take_profit_price=profit_target_price,
             leverage=leverage,
@@ -2190,7 +2474,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
                 live_entry_receipt.get("entry_result"),
             )
             return
-    
+
     # Open position
     trade_type_raw = str(decision.get("trade_type", "TYPE A")).strip().upper()
     trade_type = trade_type_raw or "TYPE A"
@@ -2201,7 +2485,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     positions[coin] = {
         'side': side,
         'quantity': quantity,
-        'entry_price': current_price,
+        'entry_price': entry_price,
         'profit_target': profit_target_price,
         'stop_loss': stop_loss_price,
         'leverage': leverage,
@@ -2240,7 +2524,6 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     
     balance -= total_cost
     
-    entry_price = current_price
     target_price = profit_target_price
     stop_price = stop_loss_price
 
@@ -2361,7 +2644,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     log_trade(coin, 'ENTRY', {
         'side': side,
         'quantity': quantity,
-        'price': current_price,
+        'price': entry_price,
         'profit_target': decision['profit_target'],
         'stop_loss': decision['stop_loss'],
         'leverage': leverage,
@@ -2369,7 +2652,10 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
         'trade_type': trade_type,
         'phase': trail_phase,
         'pnl': 0,
-        'reason': f"{reason_text or 'AI entry signal'} | {trade_type} {trail_phase} | Fees: ${entry_fee:.2f}"
+        'reason': f"{reason_text or 'AI entry signal'} | {trade_type} {trail_phase} | Fees: ${entry_fee:.2f}",
+        'confluence_tags': ';'.join(decision.get('confluence_tags', [])) if isinstance(decision.get('confluence_tags'), list) else str(decision.get('confluence_tags', '')),
+        'trigger_tags': ';'.join(decision.get('trigger_tags', [])) if isinstance(decision.get('trigger_tags'), list) else str(decision.get('trigger_tags', '')),
+        'reasoning_categories': ';'.join(decision.get('reasoning_categories', [])) if isinstance(decision.get('reasoning_categories'), list) else str(decision.get('reasoning_categories', ''))
     })
     save_state()
 
@@ -2386,6 +2672,26 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
     if original_quantity <= 0:
         logging.warning(f"{coin}: Position quantity is non-positive; skipping close.")
         return
+
+    # Calculate slippage/spread for backtesting exit price
+    is_backtest = os.getenv("BACKTEST_RUN_ID") is not None
+    symbol = COIN_TO_SYMBOL.get(coin)
+    exit_price = current_price
+    if is_backtest and symbol:
+        slippage_factor = float(os.getenv("BACKTEST_SLIPPAGE_FACTOR", "0.1"))
+        spread_pct = float(os.getenv("BACKTEST_SPREAD_PCT", "0.0002"))
+        data = fetch_market_data(symbol)
+        atr = data.get("atr", 0.0) if data else 0.0
+        slippage = slippage_factor * atr
+        spread = current_price * spread_pct
+        if pos["side"].lower() == "long":
+            exit_price = current_price - slippage - 0.5 * spread
+        else:
+            exit_price = current_price + slippage + 0.5 * spread
+        logging.info(
+            f"{coin}: Close slippage/spread applied. Raw: {current_price:.4f} -> Slipped Exit: {exit_price:.4f} "
+            f"(Slippage: {slippage:.4f}, Spread: {spread:.4f})"
+        )
 
     def _to_float(value: Any) -> Optional[float]:
         try:
@@ -2443,16 +2749,16 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
     leverage_value = pos.get("leverage", 1)
 
     if side == "long":
-        gross_pnl = (current_price - entry_price) * close_quantity
+        gross_pnl = (exit_price - entry_price) * close_quantity
     else:
-        gross_pnl = (entry_price - current_price) * close_quantity
+        gross_pnl = (entry_price - exit_price) * close_quantity
 
     fee_rate_raw = pos.get("fee_rate", TAKER_FEE_RATE)
     fee_rate = _to_float(fee_rate_raw)
     if fee_rate is None or fee_rate < 0:
         fee_rate = TAKER_FEE_RATE
 
-    exit_fee = close_quantity * current_price * fee_rate
+    exit_fee = close_quantity * exit_price * fee_rate
 
     fees_paid_total = float(pos.get("fees_paid", 0.0))
     entry_fee_share = fees_paid_total * (close_quantity / original_quantity)
@@ -2484,7 +2790,7 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
 
     label = "[PARTIAL CLOSE]" if is_partial else "[CLOSE]"
     color = Fore.GREEN if net_pnl >= 0 else Fore.RED
-    line = f"{color}{label} {coin} {pos['side'].upper()} {close_quantity:.4f} @ ${current_price:.4f}"
+    line = f"{color}{label} {coin} {pos['side'].upper()} {close_quantity:.4f} @ ${exit_price:.4f}"
     print(line)
     record_iteration_message(line)
 
@@ -2538,7 +2844,7 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
         else f"{result_emoji} *CLOSE SIGNAL - {result_label}* {result_emoji}"
     )
 
-    price_change_pct = ((current_price - entry_price) / entry_price) * 100 if entry_price else 0.0
+    price_change_pct = ((exit_price - entry_price) / entry_price) * 100 if entry_price else 0.0
     price_change_sign = "+" if price_change_pct >= 0 else ""
 
     roi_pct = (net_pnl / margin_released) * 100 if margin_released else 0.0
@@ -2551,7 +2857,7 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
         f"*Direction:* {pos['side'].upper()}\n"
         f"*Closed Size:* `{close_quantity:.4f} {coin}`\n"
         f"*Entry:* `${entry_price:.4f}`\n"
-        f"*Exit:* `${current_price:.4f}` ({price_change_sign}{price_change_pct:.2f}%)\n"
+        f"*Exit:* `${exit_price:.4f}` ({price_change_sign}{price_change_pct:.2f}%)\n"
         f"\n"
         f"💰 *P&L Summary*\n"
         f"• Gross: `${gross_pnl:.2f}`\n"
@@ -2596,13 +2902,16 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
         {
             "side": pos["side"],
             "quantity": close_quantity,
-            "price": current_price,
+            "price": exit_price,
             "profit_target": 0,
             "stop_loss": 0,
             "leverage": leverage_value,
             "confidence": 0,
             "pnl": net_pnl,
             "reason": log_reason,
+            "confluence_tags": ';'.join(decision.get('confluence_tags', [])) if isinstance(decision.get('confluence_tags'), list) else str(decision.get('confluence_tags', '')),
+            "trigger_tags": ';'.join(decision.get('trigger_tags', [])) if isinstance(decision.get('trigger_tags'), list) else str(decision.get('trigger_tags', '')),
+            "reasoning_categories": ';'.join(decision.get('reasoning_categories', [])) if isinstance(decision.get('reasoning_categories'), list) else str(decision.get('reasoning_categories', ''))
         },
     )
 
@@ -2637,11 +2946,18 @@ def process_ai_decisions(decisions: Dict[str, Any]) -> None:
         decision = decisions[coin]
         signal = decision.get("signal", "hold")
 
+        conf_tags = ';'.join(decision.get('confluence_tags', [])) if isinstance(decision.get('confluence_tags'), list) else str(decision.get('confluence_tags', ''))
+        trig_tags = ';'.join(decision.get('trigger_tags', [])) if isinstance(decision.get('trigger_tags'), list) else str(decision.get('trigger_tags', ''))
+        rc_tags = ';'.join(decision.get('reasoning_categories', [])) if isinstance(decision.get('reasoning_categories'), list) else str(decision.get('reasoning_categories', ''))
+
         log_ai_decision(
             coin,
             signal,
             decision.get("justification", ""),
             decision.get("confidence", 0),
+            confluence_tags=conf_tags,
+            trigger_tags=trig_tags,
+            reasoning_categories=rc_tags
         )
 
         symbol = COIN_TO_SYMBOL.get(coin)
@@ -2987,18 +3303,30 @@ def main() -> None:
             
             # Display portfolio summary
             total_equity = calculate_total_equity()
-            total_return = ((total_equity - START_CAPITAL) / START_CAPITAL) * 100
+            total_net_profit = total_equity - START_CAPITAL
+            total_return = (total_net_profit / START_CAPITAL) * 100 if START_CAPITAL else 0.0
             equity_color = Fore.GREEN if total_return >= 0 else Fore.RED
             total_margin = calculate_total_margin()
             net_unrealized_total = total_equity - balance - total_margin
             net_color = Fore.GREEN if net_unrealized_total >= 0 else Fore.RED
             register_equity_snapshot(total_equity)
+            
+            # Performance metrics
             sortino_ratio = calculate_sortino_ratio(
                 equity_history,
                 CHECK_INTERVAL,
                 RISK_FREE_RATE,
             )
+            mdd = calculate_max_drawdown(equity_history)
+            recovery_factor = 0.0
+            if mdd is not None and mdd > 0:
+                max_dd_amount = START_CAPITAL * mdd
+                recovery_factor = total_net_profit / max_dd_amount if max_dd_amount > 0 else 0.0
             
+            trade_stats = summarize_trades(TRADES_CSV)
+            profit_factor = trade_stats.get("profit_factor")
+            win_rate = trade_stats.get("win_rate_pct", 0.0)
+
             line = f"\n{Fore.YELLOW}{'─'*20}"
             print(line)
             record_iteration_message(line)
@@ -3015,12 +3343,36 @@ def main() -> None:
                 line = f"Margin Allocated: ${total_margin:.2f}"
                 print(line)
                 record_iteration_message(line)
-            line = f"Total Equity: {equity_color}${total_equity:.2f} ({total_return:+.2f}%){Style.RESET_ALL}"
+            
+            line = f"Total Equity: {equity_color}${total_equity:.2f} ({total_return:+.2f}% | ${total_net_profit:+.2f}){Style.RESET_ALL}"
             print(line)
             record_iteration_message(line)
+            
             line = f"Unrealized PnL: {net_color}${net_unrealized_total:.2f}{Style.RESET_ALL}"
             print(line)
             record_iteration_message(line)
+            
+            total_closed = trade_stats.get("close_events", 0)
+            winning_trades = trade_stats.get("winning_trades", 0)
+            losing_trades = trade_stats.get("losing_trades", 0)
+            loss_rate = (losing_trades / total_closed * 100) if total_closed > 0 else 0.0
+
+            perf_line = f"Profit Trades: {winning_trades} wins ({win_rate:.1f}%)"
+            print(perf_line)
+            record_iteration_message(perf_line)
+
+            loss_line = f"Loss Trades: {losing_trades} losses ({loss_rate:.1f}%)"
+            if profit_factor is not None:
+                loss_line += f" | Profit Factor: {profit_factor:.2f}"
+            print(loss_line)
+            record_iteration_message(loss_line)
+            
+            rf_line = f"Recovery Factor: {recovery_factor:.2f}"
+            if mdd is not None:
+                rf_line += f" | MaxDD: {mdd*100:.2f}%"
+            print(rf_line)
+            record_iteration_message(rf_line)
+
             if sortino_ratio is not None:
                 sortino_color = Fore.GREEN if sortino_ratio >= 0 else Fore.RED
                 line = f"Sortino Ratio: {sortino_color}{sortino_ratio:+.2f}{Style.RESET_ALL}"
@@ -3028,6 +3380,7 @@ def main() -> None:
                 line = "Sortino Ratio: N/A (need more data)"
             print(line)
             record_iteration_message(line)
+            
             line = f"Open Positions: {len(positions)}"
             print(line)
             record_iteration_message(line)

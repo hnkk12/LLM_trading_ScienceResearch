@@ -194,12 +194,17 @@ class BacktestConfig:
             model = os.getenv("BACKTEST_MODEL")
 
         temperature_raw = os.getenv("BACKTEST_TEMPERATURE")
-        temperature = None
+        temperature = 0.0  # Force 0.0 by default for deterministic backtests
         if temperature_raw:
             try:
-                temperature = float(temperature_raw)
+                temp_val = float(temperature_raw)
+                if temp_val in (0.0, 0.1):
+                    temperature = temp_val
+                else:
+                    logging.warning("BACKTEST_TEMPERATURE '%s' overridden to 0.0 for determinism.", temperature_raw)
+                    temperature = 0.0
             except ValueError:
-                logging.warning("Invalid BACKTEST_TEMPERATURE '%s'; ignoring.", temperature_raw)
+                logging.warning("Invalid BACKTEST_TEMPERATURE '%s'; defaulting to 0.0.", temperature_raw)
 
         max_tokens_raw = os.getenv("BACKTEST_MAX_TOKENS")
         max_tokens = None
@@ -236,7 +241,7 @@ class BacktestConfig:
             except ValueError:
                 logging.warning("Invalid BACKTEST_START_CAPITAL '%s'; ignoring.", start_capital_raw)
 
-        disable_telegram = os.getenv("BACKTEST_DISABLE_TELEGRAM", "true").strip().lower() in {"1", "true", "yes", "on"}
+        disable_telegram = os.getenv("BACKTEST_DISABLE_TELEGRAM", "false").strip().lower() in {"1", "true", "yes", "on"}
 
         base_dir.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
@@ -343,7 +348,13 @@ def load_from_dataset(symbol: str, cfg: BacktestConfig) -> pd.DataFrame:
         logging.warning("No local dataset found for %s in %s", symbol, dataset_dir)
         return pd.DataFrame(columns=KLINE_COLUMNS)
     
-    file_path = files[0] # Use the first match
+    # Try to find a file matching the start year of the backtest
+    start_year = str(cfg.start.year)
+    matching_files = [f for f in files if start_year in f.name]
+    if matching_files:
+        file_path = matching_files[0]
+    else:
+        file_path = files[0]
     logging.info("Loading local dataset for %s: %s", symbol, file_path)
     
     try:
@@ -429,169 +440,6 @@ class HistoricalBinanceClient:
         if self._current_timestamp_ms is None:
             return None
         return datetime.fromtimestamp(self._current_timestamp_ms / 1000, tz=timezone.utc)
-
-
-def compute_max_drawdown(equity_values: Iterable[float]) -> Optional[float]:
-    values = np.array([v for v in equity_values if np.isfinite(v)], dtype=float)
-    if values.size < 2:
-        return None
-    peaks = np.maximum.accumulate(values)
-    drawdowns = (peaks - values) / peaks
-    return float(drawdowns.max()) if drawdowns.size else None
-
-
-def summarize_trades(trades_path: Path) -> Dict[str, Any]:
-    empty_stats = {
-        "total_trades": 0,
-        "closed_trades": 0,
-        "partial_closes": 0,
-        "close_events": 0,
-        "winning_trades": 0,
-        "losing_trades": 0,
-        "breakeven_trades": 0,
-        "win_rate_pct": None,
-        "net_realized_pnl": 0.0,
-        "gross_win": 0.0,
-        "gross_loss": 0.0,
-        "profit_factor": None,
-        "avg_trade_pnl": None,
-        "avg_holding_time_seconds": None,
-        "max_consecutive_wins": 0,
-        "max_consecutive_losses": 0,
-    }
-
-    if not trades_path.exists():
-        return dict(empty_stats)
-
-    try:
-        df = pd.read_csv(trades_path)
-    except Exception as exc:  # pragma: no cover - defensive against bad CSVs
-        logging.warning("Unable to load trade history from %s: %s", trades_path, exc)
-        return dict(empty_stats)
-
-    if df.empty or "action" not in df:
-        return dict(empty_stats)
-
-    # Calculate holding time and consecutive streaks
-    holding_times = []
-    open_positions: Dict[str, List[Dict[str, Any]]] = {}
-    
-    # Sort by timestamp to ensure chronological processing
-    df["timestamp_dt"] = pd.to_datetime(df["timestamp"])
-    df = df.sort_values("timestamp_dt")
-    
-    max_consecutive_wins = 0
-    max_consecutive_losses = 0
-    current_streak_type = None # 'win' or 'loss'
-    current_streak_count = 0
-
-    actions = df["action"].astype(str).str.upper().str.strip()
-    
-    for _, row in df.iterrows():
-        coin = row["coin"]
-        action = str(row["action"]).upper()
-        ts = row["timestamp_dt"]
-        
-        if action == "ENTRY":
-            if coin not in open_positions:
-                open_positions[coin] = []
-            open_positions[coin].append({"ts": ts, "qty": float(row["quantity"])})
-        elif action in ["CLOSE", "CLOSE_PARTIAL"]:
-            close_qty = float(row["quantity"])
-            pnl = float(row["pnl"])
-            
-            # Match with entries (FIFO) to calculate holding time
-            if coin in open_positions:
-                while close_qty > 0 and open_positions[coin]:
-                    entry = open_positions[coin][0]
-                    if entry["qty"] <= close_qty + 1e-8:
-                        # Full entry closed
-                        duration = (ts - entry["ts"]).total_seconds()
-                        holding_times.append(duration)
-                        close_qty -= entry["qty"]
-                        open_positions[coin].pop(0)
-                    else:
-                        # Partial entry closed
-                        duration = (ts - entry["ts"]).total_seconds()
-                        holding_times.append(duration)
-                        entry["qty"] -= close_qty
-                        close_qty = 0
-            
-            # Streak calculation
-            if pnl > 0:
-                if current_streak_type == 'win':
-                    current_streak_count += 1
-                else:
-                    current_streak_type = 'win'
-                    current_streak_count = 1
-                max_consecutive_wins = max(max_consecutive_wins, current_streak_count)
-            elif pnl < 0:
-                if current_streak_type == 'loss':
-                    current_streak_count += 1
-                else:
-                    current_streak_type = 'loss'
-                    current_streak_count = 1
-                max_consecutive_losses = max(max_consecutive_losses, current_streak_count)
-            elif pnl == 0:
-                # Breakeven resets streak
-                current_streak_type = None
-                current_streak_count = 0
-
-    entries_mask = actions == "ENTRY"
-    closes_mask = actions == "CLOSE"
-    partial_mask = actions == "CLOSE_PARTIAL"
-    close_events_mask = closes_mask | partial_mask
-
-    total_trades = int(entries_mask.sum())
-    full_closes = int(closes_mask.sum())
-    partial_closes = int(partial_mask.sum())
-
-    close_trades = df.loc[close_events_mask].copy()
-    if close_trades.empty:
-        return {
-            **empty_stats,
-            "total_trades": total_trades,
-            "closed_trades": full_closes,
-            "partial_closes": partial_closes,
-        }
-
-    close_trades["pnl"] = pd.to_numeric(close_trades["pnl"], errors="coerce")
-    close_trades = close_trades[np.isfinite(close_trades["pnl"])]
-
-    close_events = int(len(close_trades))
-    winning = int((close_trades["pnl"] > 0).sum())
-    losing = int((close_trades["pnl"] < 0).sum())
-    breakeven = int((close_trades["pnl"] == 0).sum())
-    win_rate = (winning / close_events) * 100 if close_events else None
-    net_realized = float(close_trades["pnl"].sum()) if close_events else 0.0
-    avg_trade = net_realized / close_events if close_events else None
-
-    wins = close_trades[close_trades["pnl"] > 0]["pnl"]
-    losses = close_trades[close_trades["pnl"] < 0]["pnl"]
-    gross_profit = float(wins.sum()) if not wins.empty else 0.0
-    gross_loss = float(-losses.sum()) if not losses.empty else 0.0
-    profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else None
-    
-    avg_holding_time = float(np.mean(holding_times)) if holding_times else None
-
-    return {
-        "total_trades": total_trades,
-        "closed_trades": full_closes,
-        "partial_closes": partial_closes,
-        "close_events": close_events,
-        "winning_trades": winning,
-        "losing_trades": losing,
-        "breakeven_trades": breakeven,
-        "win_rate_pct": float(win_rate) if win_rate is not None else None,
-        "net_realized_pnl": net_realized,
-        "gross_win": gross_profit,
-        "gross_loss": gross_loss,
-        "profit_factor": profit_factor,
-        "avg_trade_pnl": avg_trade,
-        "avg_holding_time_seconds": avg_holding_time,
-        "max_consecutive_wins": max_consecutive_wins,
-        "max_consecutive_losses": max_consecutive_losses,
-    }
 
 
 def configure_environment(cfg: BacktestConfig) -> None:
@@ -694,8 +542,13 @@ def main() -> None:
     def simulated_time() -> datetime:
         return datetime.fromtimestamp(time_holder["value"] / 1000, tz=timezone.utc)
 
+    if cfg.start_capital is not None:
+        bot.START_CAPITAL = cfg.start_capital
+        logging.info("Starting capital set to BACKTEST_START_CAPITAL: $%.2f", bot.START_CAPITAL)
+
     bot.set_time_provider(simulated_time)
-    bot.reset_state(cfg.start_capital)
+    # Ensure the bot's internal state matches our backtest starting capital
+    bot.reset_state(bot.START_CAPITAL)
     bot.init_csv_files()
     bot.register_equity_snapshot(bot.START_CAPITAL)
 
@@ -703,6 +556,7 @@ def main() -> None:
 
     logging.info("LLM model used for this backtest: %s", bot.LLM_MODEL_NAME)
     print(f"LLM model used for this backtest: {bot.LLM_MODEL_NAME}")
+    print(f"Starting capital: ${bot.START_CAPITAL:.2f}")
 
     ai_calls_count = 0
     for idx, timestamp_ms in enumerate(timeline, start=1):
@@ -786,13 +640,31 @@ def main() -> None:
                 ai_calls_count
             )
 
+    # Force close all remaining positions at the end of backtest to realize PnL
+    if bot.positions:
+        logging.info("End of backtest reached. Force-closing %d remaining positions...", len(bot.positions))
+        final_timestamp_ms = int(timeline[-1])
+        time_holder["value"] = final_timestamp_ms
+        historical_client.set_current_timestamp(final_timestamp_ms)
+        
+        # Create a list of coins to avoid 'dictionary size changed during iteration'
+        open_coins = list(bot.positions.keys())
+        for coin in open_coins:
+            symbol = bot.COIN_TO_SYMBOL.get(coin)
+            if not symbol: continue
+            data = bot.fetch_market_data(symbol)
+            if not data: continue
+            
+            # Use a dummy 'close' decision
+            bot.execute_close(coin, {"signal": "close", "justification": "End of backtest force-close"}, data["price"])
+
     final_equity = bot.calculate_total_equity()
     total_net_profit = final_equity - bot.START_CAPITAL
     total_return_pct = (total_net_profit / bot.START_CAPITAL) * 100 if bot.START_CAPITAL else 0.0
     sortino = bot.calculate_sortino_ratio(bot.equity_history, interval_seconds, bot.RISK_FREE_RATE)
     sharpe = bot.calculate_sharpe_ratio(bot.equity_history, interval_seconds, bot.RISK_FREE_RATE)
-    max_drawdown = compute_max_drawdown(bot.equity_history)
-    trade_stats = summarize_trades(bot.TRADES_CSV)
+    max_drawdown = bot.calculate_max_drawdown(bot.equity_history)
+    trade_stats = bot.summarize_trades(bot.TRADES_CSV)
 
     recovery_factor = None
     if max_drawdown is not None and max_drawdown > 0:
@@ -801,6 +673,37 @@ def main() -> None:
         max_dd_amount = bot.START_CAPITAL * max_drawdown
         recovery_factor = total_net_profit / max_dd_amount if max_dd_amount > 0 else None
 
+    # Calculate daily returns for VaR/CVaR and exports
+    var_95, cvar_95, daily_returns = 0.0, 0.0, []
+    if len(bot.equity_history) >= 2 and timeline:
+        try:
+            delta = interval_to_timedelta(cfg.interval)
+        except Exception:
+            delta = timedelta(minutes=15)
+        start_ts = timeline[0] - int(delta.total_seconds() * 1000)
+        all_ts = [start_ts] + list(timeline)
+        equity_vals = bot.equity_history[:len(all_ts)]
+        if len(equity_vals) < len(all_ts):
+            equity_vals = equity_vals + [equity_vals[-1]] * (len(all_ts) - len(equity_vals))
+            
+        dates = pd.to_datetime(all_ts, unit='ms', utc=True)
+        ts_series = pd.Series(equity_vals, index=dates)
+        daily_equity = ts_series.resample('1D').last().ffill()
+        if len(daily_equity) >= 2:
+            daily_returns_series = daily_equity.pct_change().dropna()
+        else:
+            daily_returns_series = ts_series.pct_change().dropna()
+            
+        daily_returns = daily_returns_series.tolist()
+        if not daily_returns_series.empty:
+            var_95_raw = np.percentile(daily_returns_series, 5)
+            var_95 = -var_95_raw if var_95_raw < 0 else 0.0
+            losses_beyond = daily_returns_series[daily_returns_series <= var_95_raw]
+            if not losses_beyond.empty:
+                cvar_95 = -losses_beyond.mean() if losses_beyond.mean() < 0 else 0.0
+            else:
+                cvar_95 = var_95
+
     # Helper for duration formatting
     def format_seconds(seconds: Optional[float]) -> str:
         if seconds is None: return "N/A"
@@ -808,6 +711,11 @@ def main() -> None:
         if seconds < 3600: return f"{seconds/60:.1f}m"
         if seconds < 86400: return f"{seconds/3600:.1f}h"
         return f"{seconds/86400:.1f}d"
+
+    # Calculate additional percentages for display
+    total_closed = trade_stats['close_events']
+    win_pct_total = (trade_stats['winning_trades'] / total_closed * 100) if total_closed > 0 else 0
+    loss_pct_total = (trade_stats['losing_trades'] / total_closed * 100) if total_closed > 0 else 0
 
     results = {
         "run_id": cfg.run_id,
@@ -828,9 +736,17 @@ def main() -> None:
             "total_return_pct": total_return_pct,
             "max_drawdown_pct": (max_drawdown * 100) if max_drawdown is not None else None,
             "recovery_factor": recovery_factor,
+            "profit_factor": trade_stats['profit_factor'],
+            "win_rate_pct": win_pct_total,
             "sharpe_ratio": sharpe,
             "sortino_ratio": sortino,
+            "var_95_pct": var_95 * 100,
+            "cvar_95_pct": cvar_95 * 100,
+            "gross_profit": trade_stats['gross_win'],
+            "gross_loss": trade_stats['gross_loss'],
         },
+        "daily_returns": daily_returns,
+        "equity_history": bot.equity_history,
         "llm": {
             "model": bot.LLM_MODEL_NAME,
             "temperature": bot.LLM_TEMPERATURE,
@@ -848,7 +764,11 @@ def main() -> None:
                 "full": bot.TRADING_RULES_PROMPT,
             },
         },
-        "trading": trade_stats,
+        "trading": {
+            **trade_stats,
+            "win_trades_pct_total": win_pct_total,
+            "loss_trades_pct_total": loss_pct_total,
+        },
         "generated_at": simulated_time().isoformat(),
     }
 
@@ -861,19 +781,47 @@ def main() -> None:
     # Send Telegram notification if enabled
     if not cfg.disable_telegram and bot.TELEGRAM_BOT_TOKEN:
         try:
-            msg = (
-                f"📊 *Backtest Complete*\n\n"
-                f"🚀 *Model:* `{bot.LLM_MODEL_NAME}`\n"
-                f"💰 *Total Net Profit:* `${total_net_profit:.2f}` ({total_return_pct:.2f}%)\n"
-                f"📈 *Profit Factor:* `{trade_stats['profit_factor'] if trade_stats['profit_factor'] is not None else 0:.2f}`\n"
-                f"📉 *Max Drawdown:* `{(max_drawdown * 100) if max_drawdown is not None else 0:.2f}%`\n"
-                f"🛡️ *Recovery Factor:* `{recovery_factor if recovery_factor is not None else 0:.2f}`\n"
-                f"📊 *Sharpe Ratio:* `{sharpe if sharpe is not None else 0:.2f}`\n\n"
-                f"✅ *Win Rate:* `{trade_stats['win_rate_pct'] if trade_stats['win_rate_pct'] is not None else 0:.1f}%`\n"
-                f"⏱️ *Avg Hold Time:* `{format_seconds(trade_stats['avg_holding_time_seconds'])}`\n"
-                f"🔥 *Consecutive W/L:* `{trade_stats['max_consecutive_wins']}/{trade_stats['max_consecutive_losses']}`\n"
-                f"🔄 *Total Trades:* `{trade_stats['total_trades']}`\n"
-            )
+            rf_val = recovery_factor if recovery_factor is not None else 0.0
+            pf_val = trade_stats['profit_factor'] if trade_stats['profit_factor'] is not None else 0.0
+            sharpe_val = sharpe if sharpe is not None else 0.0
+            sortino_val = sortino if sortino is not None else 0.0
+            max_dd_pct = (max_drawdown * 100) if max_drawdown is not None else 0.0
+            avg_holding = format_seconds(trade_stats['avg_holding_time_seconds'])
+            
+            crisis_period = f"{cfg.start.strftime('%Y-%m-%d')} to {cfg.end.strftime('%Y-%m-%d')}"
+            
+            rows = [
+                ("Model", bot.LLM_MODEL_NAME),
+                ("Asset", ", ".join(bot.SYMBOLS)),
+                ("Crisis Period", crisis_period),
+                ("Initial Capital", f"${bot.START_CAPITAL:,.2f}"),
+                ("Final Capital", f"${final_equity:,.2f}"),
+                ("Net Profit", f"{'+' if total_net_profit >= 0 else '-'}${abs(total_net_profit):,.2f}"),
+                ("Return %", f"{total_return_pct:+.2f}%"),
+                ("Total Trades", str(trade_stats['total_trades'])),
+                ("Win Rate", f"{win_pct_total:.1f}%"),
+                ("Profit Factor", f"{pf_val:.2f}"),
+                ("Sharpe Ratio", f"{sharpe_val:.2f}"),
+                ("Sortino Ratio", f"{sortino_val:.2f}"),
+                ("Maximum Drawdown", f"{max_dd_pct:.2f}%"),
+                ("Recovery Factor", f"{rf_val:.2f}"),
+                ("VaR/CVaR (95%)", f"{var_95*100:.2f}% / {cvar_95*100:.2f}%"),
+                ("Avg Holding Time", avg_holding),
+            ]
+            
+            col1_w = max(len(r[0]) for r in rows) + 2
+            col2_w = max(len(str(r[1])) for r in rows) + 2
+            
+            border = f"+{'-' * col1_w}+{'-' * col2_w}+"
+            header = f"| {'Metric':<{col1_w-2}} | {'Value':<{col2_w-2}} |"
+            
+            table_lines = [border, header, border]
+            for m, v in rows:
+                table_lines.append(f"| {m:<{col1_w-2}} | {str(v):<{col2_w-2}} |")
+            table_lines.append(border)
+            table_str = "\n".join(table_lines)
+            
+            msg = f"📊 *Backtest Research Summary*\n```\n{table_str}\n```"
             bot.send_telegram_message(msg)
             logging.info("Sent backtest summary to Telegram.")
         except Exception as exc:
