@@ -15,6 +15,7 @@ import sys
 import json
 import logging
 from pathlib import Path
+from typing import Optional
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
