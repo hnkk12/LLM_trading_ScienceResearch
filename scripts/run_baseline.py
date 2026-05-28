@@ -15,7 +15,7 @@ import sys
 import json
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, List, Dict, Any
 from datetime import datetime, timezone, timedelta
 import numpy as np
 import pandas as pd
@@ -27,6 +27,288 @@ sys.path.append(str(PROJECT_ROOT))
 
 import backtest
 from backtest import BacktestConfig, HistoricalBinanceClient, KLINE_COLUMNS, load_from_dataset, interval_to_timedelta
+
+def detect_candlestick_patterns(df: pd.DataFrame, num_candles: int = 2) -> List[Dict[str, Any]]:
+    """Detect Pinbar, Engulfing, and Inside Bar patterns for the last num_candles."""
+    patterns = []
+    if len(df) < 5:
+        return patterns
+
+    for offset in range(num_candles, 0, -1):
+        idx = len(df) - offset
+        if idx <= 0:
+            continue
+        
+        row = df.iloc[idx]
+        prev_row = df.iloc[idx - 1]
+        
+        o, h, l, c = float(row["open"]), float(row["high"]), float(row["low"]), float(row["close"])
+        po, ph, pl, pc = float(prev_row["open"]), float(prev_row["high"]), float(prev_row["low"]), float(prev_row["close"])
+        
+        candle_range = h - l
+        if candle_range <= 0:
+            continue
+            
+        body = abs(c - o)
+        upper_shadow = h - max(o, c)
+        lower_shadow = min(o, c) - l
+        
+        pattern_name = None
+        details = ""
+        
+        # 1. Pinbar
+        if body <= candle_range * 0.35:
+            if lower_shadow >= candle_range * 0.6:
+                pattern_name = "Bullish Pinbar"
+                details = f"Long lower shadow at {l:.2f}"
+            elif upper_shadow >= candle_range * 0.6:
+                pattern_name = "Bearish Pinbar"
+                details = f"Long upper shadow at {h:.2f}"
+                
+        # 2. Engulfing
+        if not pattern_name:
+            if c > o and pc < po:
+                if o <= pc and c >= po and (c - o) > (po - pc):
+                    pattern_name = "Bullish Engulfing"
+                    details = "Body engulfs previous bearish body"
+            elif c < o and pc > po:
+                if o >= pc and c <= po and (o - c) > (pc - po):
+                    pattern_name = "Bearish Engulfing"
+                    details = "Body engulfs previous bullish body"
+                    
+        # 3. Inside Bar
+        if not pattern_name:
+            if h <= ph and l >= pl:
+                pattern_name = "Inside Bar"
+                details = f"Range completely within previous bar ({pl:.2f} - {ph:.2f})"
+                
+        if pattern_name:
+            patterns.append({
+                "bar_offset": -offset,
+                "pattern": pattern_name,
+                "details": details,
+                "price": c
+            })
+            
+    return patterns
+
+
+def detect_fvgs(df: pd.DataFrame, limit: int = 15) -> Dict[str, List[Dict[str, Any]]]:
+    """Detect unmitigated Bullish and Bearish Fair Value Gaps in the last limit candles."""
+    bullish_fvgs = []
+    bearish_fvgs = []
+    
+    if len(df) < 5:
+        return {"bullish": [], "bearish": []}
+        
+    start_idx = max(2, len(df) - limit)
+    
+    for i in range(start_idx, len(df)):
+        h_prev2 = float(df.iloc[i - 2]["high"])
+        l_curr = float(df.iloc[i]["low"])
+        
+        if l_curr > h_prev2:
+            fvg_low = h_prev2
+            fvg_high = l_curr
+            mitigated = False
+            for j in range(i + 1, len(df)):
+                low_j = float(df.iloc[j]["low"])
+                if low_j <= fvg_low:
+                    mitigated = True
+                    break
+                elif low_j < fvg_high:
+                    fvg_high = low_j
+            
+            if not mitigated and (fvg_high - fvg_low) > 0.05 * float(df.iloc[i]["close"]) / 100:
+                bullish_fvgs.append({
+                    "low": fvg_low,
+                    "high": fvg_high,
+                    "bar_index": i,
+                    "bar_offset": i - len(df),
+                    "gap_size_pct": (fvg_high - fvg_low) / fvg_low * 100
+                })
+                
+        l_prev2 = float(df.iloc[i - 2]["low"])
+        h_curr = float(df.iloc[i]["high"])
+        
+        if l_prev2 > h_curr:
+            fvg_low = h_curr
+            fvg_high = l_prev2
+            mitigated = False
+            for j in range(i + 1, len(df)):
+                high_j = float(df.iloc[j]["high"])
+                if high_j >= fvg_high:
+                    mitigated = True
+                    break
+                elif high_j > fvg_low:
+                    fvg_low = high_j
+                    
+            if not mitigated and (fvg_high - fvg_low) > 0.05 * float(df.iloc[i]["close"]) / 100:
+                bearish_fvgs.append({
+                    "low": fvg_low,
+                    "high": fvg_high,
+                    "bar_index": i,
+                    "bar_offset": i - len(df),
+                    "gap_size_pct": (fvg_high - fvg_low) / fvg_low * 100
+                })
+                
+    return {"bullish": bullish_fvgs, "bearish": bearish_fvgs}
+
+
+def detect_order_blocks(df: pd.DataFrame, limit: int = 20) -> Dict[str, List[Dict[str, Any]]]:
+    """Detect recent unmitigated Bullish and Bearish Order Blocks."""
+    bullish_obs = []
+    bearish_obs = []
+    
+    if len(df) < 15:
+        return {"bullish": [], "bearish": []}
+        
+    body_sizes = (df["close"] - df["open"]).abs()
+    avg_body = body_sizes.rolling(window=15).mean().fillna(0.0)
+    
+    start_idx = max(5, len(df) - limit)
+    
+    for i in range(start_idx, len(df)):
+        avg_sz = float(avg_body.iloc[i])
+        curr_body = float(body_sizes.iloc[i])
+        
+        if curr_body >= 1.5 * avg_sz and avg_sz > 0:
+            c = float(df.iloc[i]["close"])
+            o = float(df.iloc[i]["open"])
+            
+            if c > o:
+                for k in range(i - 1, i - 5, -1):
+                    if k < 0:
+                        break
+                    prev_c = float(df.iloc[k]["close"])
+                    prev_o = float(df.iloc[k]["open"])
+                    prev_l = float(df.iloc[k]["low"])
+                    prev_h = float(df.iloc[k]["high"])
+                    
+                    if prev_c < prev_o:
+                        ob_low = prev_l
+                        ob_high = prev_h
+                        
+                        mitigated = False
+                        for j in range(i, len(df)):
+                            low_j = float(df.iloc[j]["low"])
+                            if low_j < ob_low:
+                                mitigated = True
+                                break
+                        
+                        if not mitigated:
+                            bullish_obs.append({
+                                "low": ob_low,
+                                "high": ob_high,
+                                "bar_index": k,
+                                "bar_offset": k - len(df),
+                                "type": "Bullish OB"
+                            })
+                        break
+                        
+            elif c < o:
+                for k in range(i - 1, i - 5, -1):
+                    if k < 0:
+                        break
+                    prev_c = float(df.iloc[k]["close"])
+                    prev_o = float(df.iloc[k]["open"])
+                    prev_l = float(df.iloc[k]["low"])
+                    prev_h = float(df.iloc[k]["high"])
+                    
+                    if prev_c > prev_o:
+                        ob_low = prev_l
+                        ob_high = prev_h
+                        
+                        mitigated = False
+                        for j in range(i, len(df)):
+                            high_j = float(df.iloc[j]["high"])
+                            if high_j > ob_high:
+                                mitigated = True
+                                break
+                                
+                        if not mitigated:
+                            bearish_obs.append({
+                                "low": ob_low,
+                                "high": ob_high,
+                                "bar_index": k,
+                                "bar_offset": k - len(df),
+                                "type": "Bearish OB"
+                            })
+                        break
+                        
+    return {"bullish": bullish_obs, "bearish": bearish_obs}
+
+
+def detect_market_structure(df: pd.DataFrame) -> Dict[str, Any]:
+    """Detect the most recent BOS/CHoCH by scanning historical bars backwards."""
+    result = {
+        "structure_status": "Range",
+        "last_break_type": None,
+        "last_break_direction": None,
+        "break_price": None,
+        "swing_high": None,
+        "swing_low": None
+    }
+    
+    if len(df) < 20:
+        return result
+        
+    highs = df["high"].to_numpy()
+    lows = df["low"].to_numpy()
+    closes = df["close"].to_numpy()
+    
+    swing_highs = []
+    swing_lows = []
+    
+    for i in range(2, len(df) - 3):
+        if highs[i] == max(highs[i-2:i+3]):
+            swing_highs.append(highs[i])
+        if lows[i] == min(lows[i-2:i+3]):
+            swing_lows.append(lows[i])
+            
+    if swing_highs:
+        result["swing_high"] = swing_highs[-1]
+    if swing_lows:
+        result["swing_low"] = swing_lows[-1]
+        
+    for i in range(len(df) - 1, 10, -1):
+        sh_before = None
+        for k in range(i - 3, 2, -1):
+            if highs[k] == max(highs[k-2:k+3]):
+                sh_before = highs[k]
+                break
+        sl_before = None
+        for k in range(i - 3, 2, -1):
+            if lows[k] == min(lows[k-2:k+3]):
+                sl_before = lows[k]
+                break
+                
+        if sh_before and closes[i] > sh_before:
+            result["last_break_direction"] = "Bullish"
+            result["break_price"] = sh_before
+            ema20_i = float(df["ema20"].iloc[i]) if "ema20" in df else closes[i]
+            ema50_i = float(df["ema50"].iloc[i]) if "ema50" in df else closes[i]
+            if ema20_i > ema50_i:
+                result["structure_status"] = "Bullish Continuation"
+                result["last_break_type"] = "BOS"
+            else:
+                result["structure_status"] = "Bullish Reversal"
+                result["last_break_type"] = "CHoCH"
+            break
+        elif sl_before and closes[i] < sl_before:
+            result["last_break_direction"] = "Bearish"
+            result["break_price"] = sl_before
+            ema20_i = float(df["ema20"].iloc[i]) if "ema20" in df else closes[i]
+            ema50_i = float(df["ema50"].iloc[i]) if "ema50" in df else closes[i]
+            if ema20_i < ema50_i:
+                result["structure_status"] = "Bearish Continuation"
+                result["last_break_type"] = "BOS"
+            else:
+                result["structure_status"] = "Bearish Reversal"
+                result["last_break_type"] = "CHoCH"
+            break
+            
+    return result
 
 def configure_environment(cfg: BacktestConfig) -> None:
     os.environ["TRADEBOT_DATA_DIR"] = str(cfg.run_dir)
@@ -123,102 +405,238 @@ def main() -> None:
         # 2. Rule evaluation
         for symbol in bot.SYMBOLS:
             coin = bot.SYMBOL_TO_COIN.get(symbol, symbol)
-            data = bot.fetch_market_data(symbol)
-            if not data:
+            
+            # Fetch execution klines directly from client to get full DataFrame
+            klines_exec = bot.client.get_klines(symbol, cfg.interval, limit=100)
+            if not klines_exec or len(klines_exec) < 20:
                 continue
-
-            price = float(data["price"])
-            ema20 = float(data.get("ema20", price))
-            rsi = float(data.get("rsi", 50.0))
-            macd = float(data.get("macd", 0.0))
-            macd_signal = float(data.get("macd_signal", 0.0))
-            atr = float(data.get("atr", 0.0))
-
-            long_entry_condition = (price > ema20) and (rsi > 50) and (macd > macd_signal)
-            short_entry_condition = (price < ema20) and (rsi < 50) and (macd < macd_signal)
-
+                
+            df_exec = pd.DataFrame(klines_exec, columns=KLINE_COLUMNS)
+            df_exec[KLINE_COLUMNS[1:6]] = df_exec[KLINE_COLUMNS[1:6]].astype(float)
+            
+            # Calculate indicators using bot functions
+            df_exec = bot.add_indicator_columns(df_exec, ema_lengths=(20, 50))
+            df_exec["atr"] = bot.calculate_atr_series(df_exec, 14)
+            
+            latest_row = df_exec.iloc[-1]
+            price = float(latest_row["close"])
+            ema20 = float(latest_row["ema20"])
+            ema50 = float(latest_row["ema50"])
+            atr = float(latest_row["atr"]) if not pd.isna(latest_row["atr"]) else 0.0
+            
+            # Detect patterns and structure
+            patterns = detect_candlestick_patterns(df_exec, num_candles=2)
+            fvgs = detect_fvgs(df_exec, limit=15)
+            obs = detect_order_blocks(df_exec, limit=20)
+            ms = detect_market_structure(df_exec)
+            
+            # Trend Check (Wyckoff markup/markdown phase proxy)
+            trend_bullish = (ema20 > ema50) and (ms["structure_status"] in ["Bullish Continuation", "Bullish Reversal"])
+            trend_bearish = (ema20 < ema50) and (ms["structure_status"] in ["Bearish Continuation", "Bearish Reversal"])
+            
+            # SMC Mitigation Check
+            mitigates_bullish_ob = False
+            bullish_ob_target = None
+            for ob in obs["bullish"]:
+                if ob["low"] <= price <= ob["high"]:
+                    mitigates_bullish_ob = True
+                    bullish_ob_target = ob
+                    break
+                    
+            mitigates_bullish_fvg = False
+            bullish_fvg_target = None
+            for fvg in fvgs["bullish"]:
+                if fvg["low"] <= price <= fvg["high"]:
+                    mitigates_bullish_fvg = True
+                    bullish_fvg_target = fvg
+                    break
+                    
+            mitigates_bearish_ob = False
+            bearish_ob_target = None
+            for ob in obs["bearish"]:
+                if ob["low"] <= price <= ob["high"]:
+                    mitigates_bearish_ob = True
+                    bearish_ob_target = ob
+                    break
+                    
+            mitigates_bearish_fvg = False
+            bearish_fvg_target = None
+            for fvg in fvgs["bearish"]:
+                if fvg["low"] <= price <= fvg["high"]:
+                    mitigates_bearish_fvg = True
+                    bearish_fvg_target = fvg
+                    break
+            
+            # Calculate volume ratio for breakout trigger
+            df_exec["volume_sma"] = df_exec["volume"].rolling(window=20).mean().fillna(1.0)
+            df_exec["volume_ratio"] = (df_exec["volume"] / df_exec["volume_sma"].replace(0, np.nan)).fillna(1.0)
+            volume_ratio = float(df_exec["volume_ratio"].iloc[-1])
+            
+            # Check Breakout trigger
+            is_bullish_breakout = (ms["last_break_type"] == "BOS") and (ms["last_break_direction"] == "Bullish") and (volume_ratio > 1.2)
+            is_bearish_breakout = (ms["last_break_type"] == "BOS") and (ms["last_break_direction"] == "Bearish") and (volume_ratio > 1.2)
+            
+            long_entry_condition = trend_bullish and (mitigates_bullish_ob or mitigates_bullish_fvg or is_bullish_breakout)
+            short_entry_condition = trend_bearish and (mitigates_bearish_ob or mitigates_bearish_fvg or is_bearish_breakout)
+            
             # Retrieve active position
             pos = bot.positions.get(coin)
-
+            
             if pos is None:
                 # No active position: Evaluate entries
                 if long_entry_condition:
+                    # SL placement: tight SL (0.05x ATR) below OB/FVG, or default to 1.2x ATR
+                    sl_ref = price - 1.2 * atr if atr > 0 else price * 0.99
+                    trigger_source = "1.2x ATR"
+                    if mitigates_bullish_ob and bullish_ob_target:
+                        sl_ref = bullish_ob_target["low"] - 0.05 * atr if atr > 0 else bullish_ob_target["low"]
+                        trigger_source = f"OB Low ${bullish_ob_target['low']:.2f}"
+                    elif mitigates_bullish_fvg and bullish_fvg_target:
+                        sl_ref = bullish_fvg_target["low"] - 0.05 * atr if atr > 0 else bullish_fvg_target["low"]
+                        trigger_source = f"FVG Low ${bullish_fvg_target['low']:.2f}"
+                    elif is_bullish_breakout:
+                        trigger_source = f"BOS Bullish Breakout (Vol Ratio {volume_ratio:.1f}x)"
+                    
+                    stop_loss = sl_ref if sl_ref < price else (price - 1.2 * atr if atr > 0 else price * 0.99)
+                    
+                    # TP placement: quick TP (2.0x ATR) or near swing high
+                    tp_ref = price + 2.0 * atr if atr > 0 else price * 1.02
+                    if ms["swing_high"] and (price + 1.2 * atr < ms["swing_high"] < price + 3.0 * atr):
+                        tp_ref = ms["swing_high"]
+                    profit_target = tp_ref
+                    
                     decision = {
                         "coin": coin,
                         "action": "entry",
                         "side": "long",
                         "leverage": 10.0,
                         "risk_usd": bot.balance * 0.05,
-                        "stop_loss": price - 2 * atr if atr > 0 else price * 0.98,
-                        "profit_target": price + 3 * atr if atr > 0 else price * 1.03,
-                        "justification": f"Long entry rule met. Price {price:.4f} > EMA20 {ema20:.4f}, RSI {rsi:.2f}, MACD {macd:.4f} > Signal {macd_signal:.4f}",
-                        "confluence_tags": ["EMA_crossover", "RSI_over_50", "MACD_bullish"],
-                        "trigger_tags": ["EMA_crossover"],
-                        "reasoning_categories": ["trend_following", "momentum"]
+                        "stop_loss": stop_loss,
+                        "profit_target": profit_target,
+                        "justification": f"SMC Scalping Long. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bullish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "trigger_tags": ["OB_mitigation"] if mitigates_bullish_ob else (["FVG_mitigation"] if mitigates_bullish_fvg else ["BOS_breakout"]),
+                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markup"]
                     }
                     bot.execute_entry(coin, decision, price)
+                    
                 elif short_entry_condition:
+                    # SL placement: tight SL (0.05x ATR) above OB/FVG, or default to 1.2x ATR
+                    sl_ref = price + 1.2 * atr if atr > 0 else price * 1.01
+                    trigger_source = "1.2x ATR"
+                    if mitigates_bearish_ob and bearish_ob_target:
+                        sl_ref = bearish_ob_target["high"] + 0.05 * atr if atr > 0 else bearish_ob_target["high"]
+                        trigger_source = f"OB High ${bearish_ob_target['high']:.2f}"
+                    elif mitigates_bearish_fvg and bearish_fvg_target:
+                        sl_ref = bearish_fvg_target["high"] + 0.05 * atr if atr > 0 else bearish_fvg_target["high"]
+                        trigger_source = f"FVG High ${bearish_fvg_target['high']:.2f}"
+                    elif is_bearish_breakout:
+                        trigger_source = f"BOS Bearish Breakout (Vol Ratio {volume_ratio:.1f}x)"
+                        
+                    stop_loss = sl_ref if sl_ref > price else (price + 1.2 * atr if atr > 0 else price * 1.01)
+                    
+                    # TP placement: quick TP (2.0x ATR) or near swing low
+                    tp_ref = price - 2.0 * atr if atr > 0 else price * 0.98
+                    if ms["swing_low"] and (price - 3.0 * atr < ms["swing_low"] < price - 1.2 * atr):
+                        tp_ref = ms["swing_low"]
+                    profit_target = tp_ref
+                    
                     decision = {
                         "coin": coin,
                         "action": "entry",
                         "side": "short",
                         "leverage": 10.0,
                         "risk_usd": bot.balance * 0.05,
-                        "stop_loss": price + 2 * atr if atr > 0 else price * 1.02,
-                        "profit_target": price - 3 * atr if atr > 0 else price * 0.97,
-                        "justification": f"Short entry rule met. Price {price:.4f} < EMA20 {ema20:.4f}, RSI {rsi:.2f}, MACD {macd:.4f} < Signal {macd_signal:.4f}",
-                        "confluence_tags": ["EMA_crossover", "RSI_under_50", "MACD_bearish"],
-                        "trigger_tags": ["EMA_crossover"],
-                        "reasoning_categories": ["trend_following", "momentum"]
+                        "stop_loss": stop_loss,
+                        "profit_target": profit_target,
+                        "justification": f"SMC Scalping Short. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bearish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "trigger_tags": ["OB_mitigation"] if mitigates_bearish_ob else (["FVG_mitigation"] if mitigates_bearish_fvg else ["BOS_breakout"]),
+                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markdown"]
                     }
                     bot.execute_entry(coin, decision, price)
             else:
                 # Active position: Check for reversals
                 pos_side = pos["side"].lower()
                 if pos_side == "long" and short_entry_condition:
-                    # Close Long
                     close_dec = {
                         "coin": coin,
                         "action": "close",
-                        "justification": "Opposite signal (Short entry condition met)"
+                        "justification": "SMC Scalping Reversal opposite signal met (Short Entry Triggered)"
                     }
                     bot.execute_close(coin, close_dec, price)
+                    
                     # Immediately open Short
+                    sl_ref = price + 1.2 * atr if atr > 0 else price * 1.01
+                    trigger_source = "1.2x ATR"
+                    if mitigates_bearish_ob and bearish_ob_target:
+                        sl_ref = bearish_ob_target["high"] + 0.05 * atr if atr > 0 else bearish_ob_target["high"]
+                        trigger_source = f"OB High ${bearish_ob_target['high']:.2f}"
+                    elif mitigates_bearish_fvg and bearish_fvg_target:
+                        sl_ref = bearish_fvg_target["high"] + 0.05 * atr if atr > 0 else bearish_fvg_target["high"]
+                        trigger_source = f"FVG High ${bearish_fvg_target['high']:.2f}"
+                    elif is_bearish_breakout:
+                        trigger_source = f"BOS Bearish Breakout (Vol Ratio {volume_ratio:.1f}x)"
+                    stop_loss = sl_ref if sl_ref > price else (price + 1.2 * atr if atr > 0 else price * 1.01)
+                    
+                    tp_ref = price - 2.0 * atr if atr > 0 else price * 0.98
+                    if ms["swing_low"] and (price - 3.0 * atr < ms["swing_low"] < price - 1.2 * atr):
+                        tp_ref = ms["swing_low"]
+                    profit_target = tp_ref
+                    
                     decision = {
                         "coin": coin,
                         "action": "entry",
                         "side": "short",
                         "leverage": 10.0,
                         "risk_usd": bot.balance * 0.05,
-                        "stop_loss": price + 2 * atr if atr > 0 else price * 1.02,
-                        "profit_target": price - 3 * atr if atr > 0 else price * 0.97,
-                        "justification": f"Reversal short entry rule met. Price {price:.4f} < EMA20 {ema20:.4f}, RSI {rsi:.2f}",
-                        "confluence_tags": ["EMA_crossover", "RSI_under_50", "MACD_bearish"],
-                        "trigger_tags": ["EMA_crossover"],
-                        "reasoning_categories": ["trend_following", "momentum"]
+                        "stop_loss": stop_loss,
+                        "profit_target": profit_target,
+                        "justification": f"Reversal short entry rule met. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bearish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "trigger_tags": ["OB_mitigation"] if mitigates_bearish_ob else (["FVG_mitigation"] if mitigates_bearish_fvg else ["BOS_breakout"]),
+                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markdown"]
                     }
                     bot.execute_entry(coin, decision, price)
+                    
                 elif pos_side == "short" and long_entry_condition:
-                    # Close Short
                     close_dec = {
                         "coin": coin,
                         "action": "close",
-                        "justification": "Opposite signal (Long entry condition met)"
+                        "justification": "SMC Scalping Reversal opposite signal met (Long Entry Triggered)"
                     }
                     bot.execute_close(coin, close_dec, price)
+                    
                     # Immediately open Long
+                    sl_ref = price - 1.2 * atr if atr > 0 else price * 0.99
+                    trigger_source = "1.2x ATR"
+                    if mitigates_bullish_ob and bullish_ob_target:
+                        sl_ref = bullish_ob_target["low"] - 0.05 * atr if atr > 0 else bullish_ob_target["low"]
+                        trigger_source = f"OB Low ${bullish_ob_target['low']:.2f}"
+                    elif mitigates_bullish_fvg and bullish_fvg_target:
+                        sl_ref = bullish_fvg_target["low"] - 0.05 * atr if atr > 0 else bullish_fvg_target["low"]
+                        trigger_source = f"FVG Low ${bullish_fvg_target['low']:.2f}"
+                    elif is_bullish_breakout:
+                        trigger_source = f"BOS Bullish Breakout (Vol Ratio {volume_ratio:.1f}x)"
+                    stop_loss = sl_ref if sl_ref < price else (price - 1.2 * atr if atr > 0 else price * 0.99)
+                    
+                    tp_ref = price + 2.0 * atr if atr > 0 else price * 1.02
+                    if ms["swing_high"] and (price + 1.2 * atr < ms["swing_high"] < price + 3.0 * atr):
+                        tp_ref = ms["swing_high"]
+                    profit_target = tp_ref
+                    
                     decision = {
                         "coin": coin,
                         "action": "entry",
                         "side": "long",
                         "leverage": 10.0,
                         "risk_usd": bot.balance * 0.05,
-                        "stop_loss": price - 2 * atr if atr > 0 else price * 0.98,
-                        "profit_target": price + 3 * atr if atr > 0 else price * 1.03,
-                        "justification": f"Reversal long entry rule met. Price {price:.4f} > EMA20 {ema20:.4f}, RSI {rsi:.2f}",
-                        "confluence_tags": ["EMA_crossover", "RSI_over_50", "MACD_bullish"],
-                        "trigger_tags": ["EMA_crossover"],
-                        "reasoning_categories": ["trend_following", "momentum"]
+                        "stop_loss": stop_loss,
+                        "profit_target": profit_target,
+                        "justification": f"Reversal long entry rule met. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bullish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "trigger_tags": ["OB_mitigation"] if mitigates_bullish_ob else (["FVG_mitigation"] if mitigates_bullish_fvg else ["BOS_breakout"]),
+                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markup"]
                     }
                     bot.execute_entry(coin, decision, price)
 
@@ -338,8 +756,8 @@ def main() -> None:
                 "source": "deterministic_rules",
                 "file": None,
                 "override": False,
-                "preview": "EMA Cross + RSI filter + MACD trend + ATR SL/TP",
-                "full": "Long if Price > EMA20 and RSI > 50 and MACD > MACD Signal. SL 2xATR, TP 3xATR.",
+                "preview": "SMC + Price Action + Wyckoff Rule-Based Baseline",
+                "full": "Long if trend is bullish (BOS/CHoCH) and price mitigates Bullish OB/FVG and Bullish Pinbar/Engulfing trigger. Short if trend is bearish and price mitigates Bearish OB/FVG and Bearish Pinbar/Engulfing trigger. SL dynamically placed at OB/FVG boundary, TP at Swing High/Low liquidity pool.",
             },
         },
         "trading": trade_stats,

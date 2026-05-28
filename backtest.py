@@ -372,10 +372,15 @@ def load_from_dataset(symbol: str, cfg: BacktestConfig) -> pd.DataFrame:
         low_col = next((c for c in df.columns if c.lower() == "low"), "Low")
         vol_col = next((c for c in df.columns if c.lower() in ["vol.", "volume"]), "Vol.")
         
-        normalized["open"] = pd.to_numeric(df[open_col], errors="coerce")
-        normalized["high"] = pd.to_numeric(df[high_col], errors="coerce")
-        normalized["low"] = pd.to_numeric(df[low_col], errors="coerce")
-        normalized["close"] = pd.to_numeric(df[price_col], errors="coerce")
+        def to_clean_float(series: pd.Series) -> pd.Series:
+            if series.dtype == object:
+                return pd.to_numeric(series.astype(str).str.replace(",", ""), errors="coerce")
+            return pd.to_numeric(series, errors="coerce")
+
+        normalized["open"] = to_clean_float(df[open_col])
+        normalized["high"] = to_clean_float(df[high_col])
+        normalized["low"] = to_clean_float(df[low_col])
+        normalized["close"] = to_clean_float(df[price_col])
         normalized["volume"] = df[vol_col].apply(parse_dataset_volume)
         
         # Add required kline columns
