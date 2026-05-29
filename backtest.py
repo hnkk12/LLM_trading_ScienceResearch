@@ -345,49 +345,58 @@ def load_from_dataset(symbol: str, cfg: BacktestConfig) -> pd.DataFrame:
         logging.warning("No local dataset found for %s in %s", symbol, dataset_dir)
         return pd.DataFrame(columns=KLINE_COLUMNS)
     
-    file_path = files[0] # Use the first match
-    logging.info("Loading local dataset for %s: %s", symbol, file_path)
-    
-    try:
-        df = pd.read_csv(file_path)
-        # Expected columns: "Date","Price","Open","High","Low","Vol.","Change %"
-        # Map to Binance format
-        normalized = pd.DataFrame()
-        # Some CSVs might use different case for Date
-        date_col = next((c for c in df.columns if c.lower() == "date"), "Date")
-        normalized["timestamp"] = pd.to_datetime(df[date_col]).astype(np.int64) // 10**6
-        
-        price_col = next((c for c in df.columns if c.lower() in ["price", "close"]), "Price")
-        open_col = next((c for c in df.columns if c.lower() == "open"), "Open")
-        high_col = next((c for c in df.columns if c.lower() == "high"), "High")
-        low_col = next((c for c in df.columns if c.lower() == "low"), "Low")
-        vol_col = next((c for c in df.columns if c.lower() in ["vol.", "volume"]), "Vol.")
-        
-        normalized["open"] = pd.to_numeric(df[open_col], errors="coerce")
-        normalized["high"] = pd.to_numeric(df[high_col], errors="coerce")
-        normalized["low"] = pd.to_numeric(df[low_col], errors="coerce")
-        normalized["close"] = pd.to_numeric(df[price_col], errors="coerce")
-        normalized["volume"] = df[vol_col].apply(parse_dataset_volume)
-        
-        # Drop rows with NaN in critical price columns
-        before_count = len(normalized)
-        normalized.dropna(subset=["open", "high", "low", "close"], inplace=True)
-        after_count = len(normalized)
-        if after_count < before_count:
-            logging.warning("Dropped %d rows with NaN prices for %s", before_count - after_count, symbol)
+    all_dfs = []
+    for file_path in files:
+        logging.info("Loading local dataset for %s: %s", symbol, file_path)
+        try:
+            df = pd.read_csv(file_path)
+            # Expected columns: "Date","Price","Open","High","Low","Vol.","Change %"
+            # Map to Binance format
+            normalized = pd.DataFrame()
+            # Some CSVs might use different case for Date
+            date_col = next((c for c in df.columns if c.lower() == "date"), "Date")
+            normalized["timestamp"] = pd.to_datetime(df[date_col]).astype(np.int64) // 10**6
+            
+            price_col = next((c for c in df.columns if c.lower() in ["price", "close"]), "Price")
+            open_col = next((c for c in df.columns if c.lower() == "open"), "Open")
+            high_col = next((c for c in df.columns if c.lower() == "high"), "High")
+            low_col = next((c for c in df.columns if c.lower() == "low"), "Low")
+            vol_col = next((c for c in df.columns if c.lower() in ["vol.", "volume"]), "Vol.")
+            
+            normalized["open"] = pd.to_numeric(df[open_col].astype(str).str.replace(',', ''), errors="coerce")
+            normalized["high"] = pd.to_numeric(df[high_col].astype(str).str.replace(',', ''), errors="coerce")
+            normalized["low"] = pd.to_numeric(df[low_col].astype(str).str.replace(',', ''), errors="coerce")
+            normalized["close"] = pd.to_numeric(df[price_col].astype(str).str.replace(',', ''), errors="coerce")
+            normalized["volume"] = df[vol_col].apply(parse_dataset_volume)
+            
+            # Drop rows with NaN in critical price columns
+            before_count = len(normalized)
+            normalized.dropna(subset=["open", "high", "low", "close"], inplace=True)
+            after_count = len(normalized)
+            if after_count < before_count:
+                logging.warning("Dropped %d rows with NaN prices for %s in %s", before_count - after_count, symbol, file_path.name)
 
-        # Add required kline columns
-        normalized["close_time"] = normalized["timestamp"] + 86399999 # Default to 1 day
-        normalized["quote_volume"] = 0.0
-        normalized["trades"] = 0
-        normalized["taker_base"] = 0.0
-        normalized["taker_quote"] = 0.0
-        normalized["ignore"] = 0
-        
-        return normalize_kline_dataframe(normalized)
-    except Exception as exc:
-        logging.error("Failed to load dataset %s: %s", file_path, exc)
+            # Add required kline columns
+            normalized["close_time"] = normalized["timestamp"] + 86399999 # Default to 1 day
+            normalized["quote_volume"] = 0.0
+            normalized["trades"] = 0
+            normalized["taker_base"] = 0.0
+            normalized["taker_quote"] = 0.0
+            normalized["ignore"] = 0
+            
+            all_dfs.append(normalized)
+        except Exception as exc:
+            logging.error("Failed to load dataset %s: %s", file_path, exc)
+
+    if not all_dfs:
         return pd.DataFrame(columns=KLINE_COLUMNS)
+    
+    combined_df = pd.concat(all_dfs, ignore_index=True)
+    combined_df.drop_duplicates(subset=["timestamp"], inplace=True)
+    combined_df.sort_values("timestamp", inplace=True)
+    combined_df.reset_index(drop=True, inplace=True)
+    
+    return normalize_kline_dataframe(combined_df)
 
 
 class HistoricalBinanceClient:
@@ -484,7 +493,8 @@ def main() -> None:
     print(f"Backtest LLM override from env: {cfg.model}")
     configure_environment(cfg)
 
-    import bot  # pylint: disable=import-error
+    # Move bot import here so it picks up the environment variables set in configure_environment
+    import bot
     
     # Override symbols if provided in environment
     env_symbols = os.getenv("BACKTEST_SYMBOLS")

@@ -194,6 +194,12 @@ def _load_system_prompt() -> str:
     """Load system prompt from env variables or fall back to default."""
     global SYSTEM_PROMPT_SOURCE
     prompt_file = os.getenv("TRADEBOT_SYSTEM_PROMPT_FILE")
+    if not prompt_file:
+        # Auto-detect system_prompt.txt in the prompts folder
+        candidate = BASE_DIR / "prompts" / "system_prompt.txt"
+        if candidate.exists():
+            prompt_file = str(candidate)
+
     if prompt_file:
         path = Path(prompt_file).expanduser()
         if not path.is_absolute():
@@ -289,9 +295,22 @@ def _load_llm_max_tokens() -> int:
     )
 
 
+def refresh_data_paths() -> None:
+    """Update global data directory and file paths from environment."""
+    global DATA_DIR, STATE_CSV, STATE_JSON, TRADES_CSV, DECISIONS_CSV, MESSAGES_CSV
+    DATA_DIR = Path(os.getenv("TRADEBOT_DATA_DIR", str(DEFAULT_DATA_DIR))).expanduser()
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    STATE_CSV = DATA_DIR / "portfolio_state.csv"
+    STATE_JSON = DATA_DIR / "portfolio_state.json"
+    TRADES_CSV = DATA_DIR / "trade_history.csv"
+    DECISIONS_CSV = DATA_DIR / "ai_decisions.csv"
+    MESSAGES_CSV = DATA_DIR / "ai_messages.csv"
+
+
 def refresh_llm_configuration_from_env() -> None:
     """Reload LLM-related runtime settings from environment variables."""
     global LLM_MODEL_NAME, LLM_TEMPERATURE, LLM_MAX_TOKENS, LLM_THINKING_PARAM, TRADING_RULES_PROMPT
+    refresh_data_paths()
     LLM_MODEL_NAME = _load_llm_model_name()
     LLM_TEMPERATURE = _load_llm_temperature()
     LLM_MAX_TOKENS = _load_llm_max_tokens()
@@ -491,14 +510,32 @@ def init_csv_files() -> None:
                     df = pd.DataFrame(columns=STATE_COLUMNS)
                 df.to_csv(STATE_CSV, index=False, encoding='utf-8')
     
+    # TRADES_CSV Schema Migration
+    expected_trades_headers = [
+        'timestamp', 'coin', 'action', 'side', 'quantity', 'price',
+        'profit_target', 'stop_loss', 'leverage', 'confidence',
+        'gross_pnl', 'fees', 'pnl', 'balance_after', 'reason'
+    ]
     if not TRADES_CSV.exists():
         with open(TRADES_CSV, 'w', newline='', encoding='utf-8') as f:
             writer = csv.writer(f)
-            writer.writerow([
-                'timestamp', 'coin', 'action', 'side', 'quantity', 'price',
-                'profit_target', 'stop_loss', 'leverage', 'confidence',
-                'gross_pnl', 'fees', 'pnl', 'balance_after', 'reason'
-            ])
+            writer.writerow(expected_trades_headers)
+    else:
+        try:
+            df_trades = pd.read_csv(TRADES_CSV, nrows=0)
+            if len(df_trades.columns) != len(expected_trades_headers):
+                logging.info(f"Migrating {TRADES_CSV.name} from {len(df_trades.columns)} to {len(expected_trades_headers)} columns.")
+                # Read old data
+                df_old = pd.read_csv(TRADES_CSV)
+                # Add missing columns with default values
+                for col in expected_trades_headers:
+                    if col not in df_old.columns:
+                        df_old[col] = 0 if col != 'reason' else "Legacy trade data"
+                # Reorder to match expected schema
+                df_old = df_old[expected_trades_headers]
+                df_old.to_csv(TRADES_CSV, index=False, encoding='utf-8')
+        except Exception as exc:
+            logging.warning(f"Could not migrate {TRADES_CSV}: {exc}. If errors persist, delete the file.")
     
     if not DECISIONS_CSV.exists():
         with open(DECISIONS_CSV, 'w', newline='', encoding='utf-8') as f:
@@ -863,8 +900,10 @@ def save_state() -> None:
 
 def reset_state(initial_balance: Optional[float] = None) -> None:
     """Reset in-memory trading state to start a fresh run."""
-    global balance, positions, trade_history, iteration_counter, equity_history, invocation_count, current_iteration_messages, BOT_START_TIME
-    balance = float(initial_balance) if initial_balance is not None else START_CAPITAL
+    global balance, positions, trade_history, iteration_counter, equity_history, invocation_count, current_iteration_messages, BOT_START_TIME, START_CAPITAL
+    new_bal = float(initial_balance) if initial_balance is not None else START_CAPITAL
+    balance = new_bal
+    START_CAPITAL = new_bal
     positions = {}
     trade_history = []
     iteration_counter = 0
@@ -1199,6 +1238,8 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
             macd_params=(MACD_FAST, MACD_SLOW, MACD_SIGNAL),
         )
         df_execution["atr"] = calculate_atr_series(df_execution, 14)
+        df_execution["atr_long"] = calculate_atr_series(df_execution, 100)
+        df_execution["volatility_ratio"] = df_execution["atr"] / df_execution["atr_long"].replace(0, np.nan)
 
         structure_klines = binance_client.get_klines(symbol=symbol, interval="1h", limit=100)
         df_structure = pd.DataFrame(
@@ -1276,13 +1317,19 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
         rsi_component = (float(latest_trend["rsi14"]) - 50.0) / 50.0
         adx_value = float(latest_trend.get("adx", 0.0))
         adx_component = adx_value / 25.0 if adx_value else 0.0
-        ema_component = 1.0 if latest_trend["ema20"] > latest_trend["ema50"] else 0.0
-        trend_strength = (
-            ema_component * 0.30
-            + macd_ratio * 0.30
-            + rsi_component * 0.20
-            + adx_component * 0.20
+        
+        # Directional components
+        ema_direction = 1.0 if latest_trend["ema20"] > latest_trend["ema50"] else -1.0
+        
+        # Magnitude-based strength (0 to 1+)
+        trend_magnitude = (
+            0.30 * 1.0  # EMA separation exists
+            + 0.30 * min(abs(macd_ratio), 2.0) / 2.0
+            + 0.20 * min(abs(rsi_component), 1.0)
+            + 0.20 * min(adx_component, 1.0)
         )
+        
+        trend_strength = trend_magnitude * ema_direction
 
         try:
             oi_hist = binance_client.futures_open_interest_hist(symbol=symbol, period="5m", limit=30)
@@ -1397,7 +1444,8 @@ def collect_prompt_market_data(symbol: str) -> Optional[Dict[str, Any]]:
             },
             "trend_strength": float(trend_strength),
             "trend_components": {
-                "ema_component": float(ema_component),
+                "ema_direction": float(ema_direction),
+                "trend_magnitude": float(trend_magnitude),
                 "macd_ratio": float(macd_ratio),
                 "rsi_component": float(rsi_component),
                 "adx_component": float(adx_component),
@@ -1510,7 +1558,7 @@ def format_prompt_for_deepseek() -> str:
 
             prompt_lines.append(
                 f"    Trend Strength Score: {fmt(data.get('trend_strength'), 2)} "
-                f"(EMA {fmt(trend_components.get('ema_component'), 2)}, "
+                f"(EMA {fmt(trend_components.get('ema_direction'), 2)}, "
                 f"MACD ratio {fmt(trend_components.get('macd_ratio'), 2)}, "
                 f"RSI {fmt(trend_components.get('rsi_component'), 2)}, "
                 f"ADX {fmt(trend_components.get('adx_component'), 2)})"
@@ -1548,7 +1596,7 @@ def format_prompt_for_deepseek() -> str:
 
             prompt_lines.append(
                 f"    Trend Strength Score: {fmt(trend.get('trend_strength'), 2)} "
-                f"(EMA {fmt(trend_components.get('ema_component'), 2)}, "
+                f"(EMA {fmt(trend_components.get('ema_direction'), 2)}, "
                 f"MACD ratio {fmt(trend_components.get('macd_ratio'), 2)}, "
                 f"RSI {fmt(trend_components.get('rsi_component'), 2)}, "
                 f"ADX {fmt(trend_components.get('adx_component'), 2)})"
@@ -1631,6 +1679,7 @@ def format_prompt_for_deepseek() -> str:
             )
             prompt_lines.append(f"    RSI Zone: {rsi_zone}")
             prompt_lines.append(f"    ATR14: {fmt(execution['atr'], 3)}")
+            prompt_lines.append(f"    Volatility Ratio (ATR14/ATR100): {fmt(data.get('volatility_ratio'), 2)}")
 
             if execution.get("fvgs"):
                 fvg_strs = [f"{f['type'].upper()} ({f['bottom']:.2f}-{f['top']:.2f})" for f in execution["fvgs"]]
@@ -1750,14 +1799,15 @@ INSTRUCTIONS:
 Return ONLY valid JSON (no extra text). For each coin supply:
 {
   "BNB": {
-    "signal": "entry|hold|close",
+    "signal": "entry|hold|close|reject",
     "side": "long|short",              // required for entry
     "quantity": 0.0,
     "profit_target": 650.5,            // MUST be a real calculated price level
     "stop_loss": 580.2,               // MUST be a real calculated price level
-    "leverage": 3,
+    "leverage": 10,
     "confidence": 0.75,
     "risk_usd": 150.0,
+    "market_mode": "Active|Defensive|Pause", // optional for Active-Guardian
     "invalidation_condition": "1H close below 1080",
     "trade_type": "TYPE A|TYPE B|TYPE C",
     "phase": "Phase 1|Phase 2|Phase 3|Phase 4",
@@ -1766,6 +1816,7 @@ Return ONLY valid JSON (no extra text). For each coin supply:
 }
 Optional for partial closes: include "close_fraction" (0-1), "close_percent", or "close_quantity" for the amount to exit.
 CRITICAL: stop_loss and profit_target MUST be non-zero and valid price levels for any 'entry' signal.
+Respect the RISK mandate (e.g. 1% for Active-Guardian, 1.5% for Sniper) by setting 'risk_usd' accordingly.
 Do not include commentary outside the JSON response.
 """.strip()
     )
@@ -1885,17 +1936,27 @@ def call_deepseek_api(prompt: str) -> Optional[Dict[str, Any]]:
         if LLM_THINKING_PARAM is not None:
             request_payload["thinking"] = LLM_THINKING_PARAM
 
-        response = requests.post(
-            url="https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://github.com/crypto-trading-bot",
-                "X-Title": "DeepSeek Trading Bot",
-            },
-            json=request_payload,
-            timeout=30
-        )
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    url="https://openrouter.ai/api/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                        "Content-Type": "application/json",
+                        "HTTP-Referer": "https://github.com/crypto-trading-bot",
+                        "X-Title": "DeepSeek Trading Bot",
+                    },
+                    json=request_payload,
+                    timeout=60
+                )
+                break # Success
+            except (requests.exceptions.RequestException, TimeoutError) as e:
+                if attempt == max_retries - 1:
+                    raise # Rethrow on last attempt
+                logging.warning("API call failed (attempt %d/%d): %s. Retrying...", attempt + 1, max_retries, e)
+                import time
+                time.sleep(2) # Brief wait before retry
 
         if response.status_code != 200:
             notify_error(
@@ -2143,7 +2204,13 @@ def compute_max_drawdown(equity_values: Iterable[float]) -> Optional[float]:
     if values.size < 2:
         return None
     peaks = np.maximum.accumulate(values)
-    drawdowns = (peaks - values) / peaks
+    # Avoid division by zero or negative peaks
+    drawdowns = np.divide(
+        (peaks - values),
+        peaks,
+        out=np.zeros_like(values),
+        where=peaks > 0
+    )
     return float(drawdowns.max()) if drawdowns.size else None
 
 
@@ -2257,15 +2324,20 @@ def summarize_trades(trades_path: Path) -> Dict[str, Optional[float]]:
             "partial_closes": partial_closes,
         }
 
-    close_trades["pnl"] = pd.to_numeric(close_trades["pnl"], errors="coerce")
-    close_trades["gross_pnl"] = pd.to_numeric(close_trades.get("gross_pnl", 0), errors="coerce")
-    close_trades["fees"] = pd.to_numeric(close_trades.get("fees", 0), errors="coerce")
+    # Ensure numeric types and handle potential NaN/None
+    for col in ["pnl", "gross_pnl", "fees"]:
+        if col in close_trades.columns:
+            close_trades[col] = pd.to_numeric(close_trades[col], errors="coerce").fillna(0.0)
+        else:
+            close_trades[col] = 0.0
+
+    # Filter for finite PnL values just in case, though fillna(0.0) handles most cases
     close_trades = close_trades[np.isfinite(close_trades["pnl"])]
 
     close_events = int(len(close_trades))
-    winning = int((close_trades["pnl"] > 0).sum())
-    losing = int((close_trades["pnl"] < 0).sum())
-    breakeven = int((close_trades["pnl"] == 0).sum())
+    winning = int((close_trades["pnl"] > 1e-6).sum())
+    losing = int((close_trades["pnl"] < -1e-6).sum())
+    breakeven = int((close_trades["pnl"].abs() <= 1e-6).sum())
     win_rate = (winning / close_events) * 100 if close_events else None
     net_realized = float(close_trades["pnl"].sum()) if close_events else 0.0
     total_fees = float(close_trades["fees"].sum()) if "fees" in close_trades else 0.0
@@ -2435,24 +2507,7 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     side = str(decision.get('side', 'long')).lower()
     raw_reason = str(decision.get('justification', '')).strip()
     reason_text_compact = " ".join(raw_reason.split()) if raw_reason else ""
-    if reason_text_compact:
-        contradictory_phrases = (
-            "no entry",
-            "no long entry",
-            "no short entry",
-            "do not enter",
-            "avoid entry",
-            "skip entry",
-        )
-        reason_lower = reason_text_compact.lower()
-        if any(phrase in reason_lower for phrase in contradictory_phrases):
-            logging.warning(
-                "%s: Skipping entry because AI justification contradicts signal (%s)",
-                coin,
-                reason_text_compact,
-            )
-            return
-
+    
     leverage_raw = decision.get('leverage', 10)
     try:
         leverage = float(leverage_raw)
