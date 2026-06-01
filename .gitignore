@@ -1,12 +1,34 @@
-.env
+# Byte-compiled / optimized / DLL files
 __pycache__/
-ai_decisions.csv
-portfolio_state.csv
-trade_history.csv
-ai_messages.csv
-portfolio_state.json
-backtest_results.json
+*.py[cod]
+*$py.class
+
+# OS metadata
 .DS_Store
-patreon/
-medium/
-data-backtest/
+Thumbs.db
+.idea/
+.vscode/
+.antigravitycli/
+
+# Environments & credentials
+.env
+.venv
+env/
+venv/
+
+# Live trading local runtime data (to avoid cluttering repo with live trade history)
+data/
+
+# Local root files (if any are accidentally generated in root)
+/ai_decisions.csv
+/portfolio_state.csv
+/trade_history.csv
+/ai_messages.csv
+/portfolio_state.json
+/backtest_results.json
+
+# Backtest ignores
+# Ignore newly generated local runs and cache directories,
+# but KEEP the official paper baseline & LLM runs in data-backtest/ for reproducibility
+data-backtest/run-*
+data-backtest/cache/

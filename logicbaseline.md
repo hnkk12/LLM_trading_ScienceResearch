@@ -1,123 +1,123 @@
-# Logic Baseline - Rule-Based Trading Bot (Tài liệu Kỹ thuật Chi tiết)
+# Logic Baseline - Rule-Based Trading Bot (Detailed Technical Specification)
 
-Tài liệu này trình bày chi tiết về kiến trúc hoạt động, giải thuật nhận diện kỹ thuật (SMC, Wyckoff, Price Action), quy tắc vào/thoát lệnh lướt sóng (Scalping), và quy trình mô phỏng kiểm thử của Baseline Bot ([run_baseline.py](file:///D:/NCKH/LLM_trading_ScienceResearch/scripts/run_baseline.py)).
-
----
-
-## 1. Kiến trúc Tổng quan & Vai trò Hệ thống
-
-Baseline Bot là một bot giao dịch **hoàn toàn theo quy tắc (Rule-Based, Deterministic)**. Thay vì sử dụng trí tuệ nhân tạo (LLM) để phân tích đồ thị như trong [LogicAI.md](file:///D:/NCKH/LLM_trading_ScienceResearch/LogicAI.md), bot này sử dụng các điều kiện logic toán học cứng được lập trình bằng Python.
-
-### Vai trò của Baseline Bot:
-1. **Mô hình đối chứng (Baseline Model):** Tạo ra kết quả giao dịch chuẩn mực dựa trên phân tích kỹ thuật truyền thống để so sánh với hiệu năng của AI Bot dưới cùng điều kiện thị trường, phí giao dịch, và trượt giá.
-2. **Tối ưu hóa hiệu năng:** Chạy hoàn toàn cục bộ, không tốn chi phí gọi API LLM và tốc độ thực thi backtest cực nhanh.
-3. **Mô phỏng đồng bộ:** Tái sử dụng 100% cơ sở hạ tầng của [backtest.py](file:///D:/NCKH/LLM_trading_ScienceResearch/backtest.py) (bao gồm mô hình khớp lệnh trong nến, tính phí taker/maker, quản lý số dư và tính toán Sharpe/Sortino).
+This document presents the detailed architectural design, technical analysis algorithms (SMC, Wyckoff, Price Action), scalping entry/exit rules, and simulation processes of the deterministic rule-based Baseline Bot ([run_baseline.py](scripts/run_baseline.py)).
 
 ---
 
-## 2. Giải thuật Nhận diện Cấu trúc Thị trường & Mẫu hình
+## 1. Architecture Overview & System Role
 
-Baseline Bot mã hóa các khái niệm của phương pháp **Smart Money Concepts (SMC)**, **Wyckoff**, và **Price Action** thành code Python thông qua 4 hàm cốt lõi dưới đây:
+The Baseline Bot is a **fully deterministic, rule-based trading program**. Instead of utilizing a Large Language Model (LLM) to make trading decisions based on qualitative evaluation as described in [LogicAI.md](LogicAI.md), this bot evaluates market structures using fixed mathematical and logical criteria written in Python.
 
-### A. Nhận diện Mẫu nến Price Action (`detect_candlestick_patterns`)
-Hàm quét 2 cây nến gần nhất để phát hiện các tín hiệu đảo chiều/tiếp diễn trực quan:
-* **Pinbar (Hammer / Shooting Star):** Thân nến nhỏ ($\le 35\%$ tổng chiều dài nến), có bóng nến trên hoặc dưới rất dài ($\ge 60\%$ tổng chiều dài nến).
-  - *Bullish Pinbar:* Bóng nến dưới dài (áp lực mua mạnh).
-  - *Bearish Pinbar:* Bóng nến trên dài (áp lực bán mạnh).
-* **Engulfing (Nến nhấn chìm):** Nến hiện tại có thân lớn phủ hoàn toàn thân của nến trước đó và đi ngược hướng.
-* **Inside Bar:** Cây nến hiện tại có toàn bộ khoảng giá High-Low nằm trọn trong khoảng giá High-Low của cây nến trước đó (tín hiệu nén giá chờ bứt phá).
-
-### B. Phát hiện Khoảng trống Giá FVG (`detect_fvgs`)
-**Fair Value Gap (FVG)** thể hiện sự mất cân bằng giữa cung và cầu được tạo ra bởi một xung lực mạnh.
-* **Bullish FVG (Khoảng trống tăng giá):** Xuất hiện khi Low của nến thứ 3 cao hơn High của nến thứ 1. Khoảng trống được tính từ $\text{High}_{t-2}$ đến $\text{Low}_{t}$.
-* **Bearish FVG (Khoảng trống giảm giá):** Xuất hiện khi High của nến thứ 3 thấp hơn Low của nến thứ 1. Khoảng trống được tính từ $\text{High}_{t}$ đến $\text{Low}_{t-2}$.
-* **Cơ chế Mitigation (Lấp FVG):** Một FVG được coi là còn hoạt động (unmitigated) nếu giá đóng cửa các nến sau chưa từng quay đầu lấp hoàn toàn khoảng trống này.
-
-### C. Nhận diện Khối lệnh Tổ chức OB (`detect_order_blocks`)
-**Order Block (OB)** là cây nến giảm cuối cùng trước một đợt tăng mạnh (Bullish OB) hoặc cây nến tăng cuối cùng trước một đợt giảm mạnh (Bearish OB).
-1. **Xác định xung lực (Displacement):** Một đợt di chuyển giá mạnh được xác định khi thân nến vượt quá $1.5 \times$ chiều dài trung bình của 20 nến trước đó.
-2. **Xác định khối OB:**
-   - *Bullish OB:* Cây nến giảm cuối cùng trước cây nến tăng mạnh. Ranh giới High-Low của cây nến này trở thành vùng Cầu (Demand Zone).
-   - *Bearish OB:* Cây nến tăng cuối cùng trước cây nến giảm mạnh. Ranh giới High-Low của cây nến này trở thành vùng Cung (Supply Zone).
-3. **Cơ chế Mitigation (Giảm thiểu):** OB bị vô hiệu khi giá đóng cửa nằm ngoài ranh giới của OB (bị phá vỡ).
-
-### D. Xác định Cấu trúc Thị trường (`detect_market_structure`)
-Thuật toán tìm kiếm các điểm đảo chiều Swing High và Swing Low trong 20 nến gần nhất:
-* **Swing High:** Điểm cao nhất có 2 nến bên trái và 2 nến bên phải thấp hơn.
-* **Swing Low:** Điểm thấp nhất có 2 nến bên trái và 2 nến bên phải cao hơn.
-
-**Phát hiện BOS / CHoCH:**
-* **BOS (Break of Structure - Phá vỡ cấu trúc):** Khi giá đóng cửa phá vỡ Swing High gần nhất (trong xu hướng tăng) hoặc Swing Low gần nhất (trong xu hướng giảm), xác nhận xu hướng tiếp diễn.
-* **CHoCH (Change of Character - Thay đổi tính chất):** Khi giá đóng cửa phá vỡ Swing Point đối nghịch của xu hướng hiện tại, cảnh báo sự đảo chiều xu hướng chính.
-* **Quét ngược lịch sử (Backward Scan):** Để giải quyết lỗi bỏ sót tín hiệu khi giá di chuyển trong các vùng giằng co (range), hàm quét ngược từ cây nến hiện tại về quá khứ để tìm điểm BOS/CHoCH gần nhất để xác định đúng xu hướng cấu trúc hiện tại (`Bullish/Bearish Continuation` hoặc `Reversal`).
+### Role of the Baseline Bot:
+1.  **Experimental Control (Baseline Model)**: Establishes a technical analysis baseline to benchmark the LLM agent's performance under identical market feeds, slippage, and transaction fee parameters.
+2.  **Performance Optimization**: Runs entirely locally without API call overheads, facilitating rapid backtesting execution.
+3.  **Synchronous Simulation**: Reuses 100% of the backtesting infrastructure from [backtest.py](backtest.py), including the intrabar TP/SL settlement models, transaction fee logs, and portfolio performance calculations.
 
 ---
 
-## 3. Thuật toán Vào lệnh lướt sóng (Scalping Entry Logic)
+## 2. Technical Patterns & Market Structure Detections
 
-Để tối ưu hóa cho chiến thuật **Scalping (Lướt sóng ngắn)**, các điều kiện xác nhận nến nghiêm ngặt đã được lược bỏ. Bot sẽ vào lệnh trực tiếp tại ranh giới vùng Cung/Cầu hoặc đuổi theo đà bứt phá.
+The Baseline Bot encodes principles of **Smart Money Concepts (SMC)**, **Wyckoff theory**, and **Price Action** into Python logic via four core algorithms:
+
+### A. Price Action Candlestick Patterns (`detect_candlestick_patterns`)
+Scans the last two completed candles to identify reversal or continuation candlestick setups:
+*   **Pinbar (Hammer / Shooting Star)**: Characterized by a small body ($\le 35\%$ of total candle range) and a long upper or lower shadow ($\ge 60\%$ of total range).
+    *   *Bullish Pinbar*: Long lower shadow (indicates buying pressure).
+    *   *Bearish Pinbar*: Long upper shadow (indicates selling pressure).
+*   **Engulfing Candle**: The body of the current candle completely covers the body of the previous candle and closes in the opposite direction.
+*   **Inside Bar**: The High-Low range of the current candle is completely nested within the High-Low range of the preceding candle, indicating consolidation before breakout.
+
+### B. Fair Value Gap Detection (`detect_fvgs`)
+**Fair Value Gaps (FVGs)** represent price imbalances between supply and demand created by rapid, one-sided impulsive movements:
+*   **Bullish FVG**: Occurs when the Low of candle 3 is greater than the High of candle 1. The price gap boundaries are defined from $\text{High}_{t-2}$ to $\text{Low}_{t}$.
+*   **Bearish FVG**: Occurs when the High of candle 3 is less than the Low of candle 1. The price gap boundaries are defined from $\text{Low}_{t-2}$ to $\text{High}_{t}$.
+*   **Mitigation**: An FVG remains active (*unmitigated*) until subsequent candles close inside and fill the gap range.
+
+### C. Order Block Identification (`detect_order_blocks`)
+An **Order Block (OB)** represents institutional order clustering. A Bullish OB is the final down-candle prior to an upward impulse, while a Bearish OB is the final up-candle prior to a downward impulse:
+1.  **Displacement Detection**: An impulsive move is identified when the body size of a candle exceeds $1.5 \times$ the average body size of the last 20 candles.
+2.  **OB Boundary Definition**:
+    *   *Bullish OB*: The range (High-Low) of the last bearish candle preceding the upward impulse. This range is marked as a **Demand Zone**.
+    *   *Bearish OB*: The range (High-Low) of the last bullish candle preceding the downward impulse. This range is marked as a **Supply Zone**.
+3.  **Mitigation**: An OB is invalidated (mitigated) once a subsequent candle closes outside the OB boundaries.
+
+### D. Market Structure Mapping (`detect_market_structure`)
+Identifies Swing High and Swing Low points in the last 20 bars:
+*   **Swing High**: A local maximum bar flanked by two lower highs on both the left and right sides.
+*   **Swing Low**: A local minimum bar flanked by two higher lows on both the left and right sides.
+
+**BOS / CHoCH Identification**:
+*   **BOS (Break of Structure)**: Price closes above the recent Swing High (in an uptrend) or below the recent Swing Low (in a downtrend), signaling trend continuation.
+*   **CHoCH (Change of Character)**: Price closes beyond the opposing Swing Point of the current trend, signaling a structural market reversal.
+*   **Backward Scan Logic**: To prevent missing signals during trading ranges, the algorithm scans backward from the current candle to find the most recent BOS/CHoCH setup, ensuring accurate mapping of structural bias (`Bullish/Bearish Continuation` or `Reversal`).
+
+---
+
+## 3. Scalping Entry Logic
+
+To optimize for shorter-term trades, entry rules bypass restrictive candlestick confirmations. The bot enters trades directly upon touching OB/FVG zones or catching breakouts:
 
 ```mermaid
 graph TD
-    A[Mỗi cây nến mới] --> B{Kiểm tra xu hướng EMA20/50}
-    B -- EMA20 > EMA50 (Tăng) --> C{Cấu trúc Thị trường}
-    B -- EMA20 < EMA50 (Giảm) --> D{Cấu trúc Thị trường}
+    A[Each New Candle Close] --> B{Check EMA20 / EMA50 Trend}
+    B -- "EMA20 > EMA50 (Bullish)" --> C{Check Market Structure}
+    B -- "EMA20 < EMA50 (Bearish)" --> D{Check Market Structure}
     
-    C -- Bullish Continuation / Reversal --> E{Điều kiện kích hoạt Long}
-    D -- Bearish Continuation / Reversal --> F{Điều kiện kích hoạt Short}
+    C -- Bullish Continuation / Reversal --> E{Check Long Entry Trigger}
+    D -- Bearish Continuation / Reversal --> F{Check Short Entry Trigger}
     
-    E -- 1. Chạm Bullish OB --> G[Vào lệnh LONG]
-    E -- 2. Chạm Bullish FVG --> G
-    E -- 3. BOS Phá vỡ đỉnh & Vol Ratio > 1.2 --> G
+    E -- "1. Price touches Bullish OB" --> G[Execute LONG Entry]
+    E -- "2. Price touches Bullish FVG" --> G
+    E -- "3. Bullish BOS Breakout & Vol Ratio > 1.2" --> G
     
-    F -- 1. Chạm Bearish OB --> H[Vào lệnh SHORT]
-    F -- 2. Chạm Bearish FVG --> H
-    F -- 3. BOS Phá vỡ đáy & Vol Ratio > 1.2 --> H
+    F -- "1. Price touches Bearish OB" --> H[Execute SHORT Entry]
+    F -- "2. Price touches Bearish FVG" --> H
+    F -- "3. Bearish BOS Breakout & Vol Ratio > 1.2" --> H
 ```
 
-### A. Quy tắc Long Entry (Mua)
-* **Bộ lọc xu hướng (Trend Filter):** Đường EMA20 nằm trên EMA50 ($\text{EMA20} > \text{EMA50}$) **VÀ** cấu trúc thị trường đang ở trạng thái `Bullish Continuation` hoặc `Bullish Reversal`.
-* **Yếu tố kích hoạt (Trigger) - Thỏa mãn 1 trong 3:**
-  1. *OB Mitigation:* Giá hiện tại giảm về chạm vùng Bullish OB hoạt động ($\text{OB Low} \le \text{Price} \le \text{OB High}$).
-  2. *FVG Mitigation:* Giá hiện tại giảm về chạm vùng Bullish FVG hoạt động ($\text{FVG Low} \le \text{Price} \le \text{FVG High}$).
-  3. *BOS Breakout:* Giá phá vỡ đỉnh gần nhất (BOS Bullish) đồng thời có khối lượng giao dịch bùng nổ vượt trung bình ($\text{Volume Ratio} > 1.2$).
+### A. Long Entry (Buy) Rules
+*   **Trend Filter**: EMA20 is above EMA50 ($\text{EMA20} > \text{EMA50}$) **AND** the market structure is mapped as `Bullish Continuation` or `Bullish Reversal`.
+*   **Entry Trigger (Any of the following)**:
+    1.  *OB Mitigation*: The current price dips and touches the boundaries of an unmitigated Bullish OB ($\text{OB Low} \le \text{Price} \le \text{OB High}$).
+    2.  *FVG Mitigation*: The current price dips and touches the boundaries of an unmitigated Bullish FVG ($\text{FVG Low} \le \text{Price} \le \text{FVG High}$).
+    3.  *BOS Breakout*: Price breaks and closes above the recent Swing High, accompanied by volume expansion ($\text{Volume Ratio} > 1.2$).
 
-### B. Quy tắc Short Entry (Bán)
-* **Bộ lọc xu hướng (Trend Filter):** Đường EMA20 nằm dưới EMA50 ($\text{EMA20} < \text{EMA50}$) **VÀ** cấu trúc thị trường ở trạng thái `Bearish Continuation` hoặc `Bearish Reversal`.
-* **Yếu tố kích hoạt (Trigger) - Thỏa mãn 1 trong 3:**
-  1. *OB Mitigation:* Giá hiện tại tăng về chạm vùng Bearish OB hoạt động.
-  2. *FVG Mitigation:* Giá hiện tại tăng về chạm vùng Bearish FVG hoạt động.
-  3. *BOS Breakout:* Giá phá vỡ đáy gần nhất (BOS Bearish) đồng thời có khối lượng giao dịch bùng nổ vượt trung bình ($\text{Volume Ratio} > 1.2$).
-
----
-
-## 4. Quản lý Vị thế, Chốt lời & Dừng lỗ (TP/SL)
-
-Do đặc thù của Scalping đòi hỏi tỷ lệ R:R tốt trên các biến động ngắn, bot thiết lập quản lý vị thế cực kỳ chặt chẽ:
-
-### A. Dặt Dừng lỗ (Stop Loss) cực ngắn
-Dừng lỗ được thiết lập tự động dựa trên loại lệnh kích hoạt:
-* **Vào lệnh theo OB/FVG:** SL được đặt ngay tại biên an toàn dưới đáy của OB/FVG kích hoạt (đối với lệnh Long) hoặc trên đỉnh của OB/FVG kích hoạt (đối với lệnh Short), cộng/trừ một khoảng đệm nhỏ:
-  $$\text{SL}_{\text{Long}} = \text{OB/FVG Low} - 0.05 \times \text{ATR}$$
-  $$\text{SL}_{\text{Short}} = \text{OB/FVG High} + 0.05 \times \text{ATR}$$
-* **Vào lệnh theo Breakout:** SL mặc định được đặt cách giá vào một khoảng $1.2 \times \text{ATR}$.
-
-### B. Đặt Chốt lời (Take Profit) nhanh
-* **TP Mặc định:** Đặt ở mức $2.0 \times \text{ATR}$ từ điểm vào lệnh để đảm bảo chốt lời nhanh trong các đợt sóng ngắn.
-* **TP theo Swing Point:** Nếu phát hiện đỉnh/đáy Swing cũ của cấu trúc thị trường nằm trong phạm vi từ $1.2 \times \text{ATR}$ đến $3.0 \times \text{ATR}$ so với điểm vào, bot sẽ tự động đặt TP trùng khớp với các mốc này nhằm tận dụng dòng thanh khoản (Liquidity Sweep).
-
-### C. Luật đảo chiều vị thế lập tức (Reversal Rule)
-Nếu đang mở một vị thế (ví dụ: Long) nhưng xuất hiện tín hiệu kích hoạt chiều ngược lại (Short Entry Condition thỏa mãn):
-1. Bot lập tức gửi lệnh đóng vị thế Long hiện tại với lý do: `"SMC Scalping Reversal opposite signal met"`.
-2. Đồng thời mở ngay một vị thế Short mới tại nến đó để bám sát xu hướng dòng tiền lớn.
+### B. Short Entry (Sell) Rules
+*   **Trend Filter**: EMA20 is below EMA50 ($\text{EMA20} < \text{EMA50}$) **AND** the market structure is mapped as `Bearish Continuation` or `Bearish Reversal`.
+*   **Entry Trigger (Any of the following)**:
+    1.  *OB Mitigation*: The current price rallies and touches the boundaries of an unmitigated Bearish OB.
+    2.  *FVG Mitigation*: The current price rallies and touches the boundaries of an unmitigated Bearish FVG.
+    3.  *BOS Breakout*: Price breaks and closes below the recent Swing Low, accompanied by volume expansion ($\text{Volume Ratio} > 1.2$).
 
 ---
 
-## 5. Quy trình Chạy & Giả lập Backtest
+## 4. Position, Take Profit & Stop Loss Management
 
-1. **Khởi tạo dữ liệu:** Đọc các tham số cấu hình từ file `.env` (Symbol, Start/End Date, Start Capital).
-2. **Duyệt qua trục thời gian (Timeline Loop):**
-   - Core Python mô phỏng từng bước giá đóng cửa qua từng ngày/nến.
-   - Đầu mỗi nến, gọi `bot.check_stop_loss_take_profit()` để kiểm tra xem giá có chạm mức SL/TP cứng trong nến trước đó hay không để khớp lệnh đóng tự động.
-3. **Đánh giá quy tắc:** Nếu không có vị thế mở, bot đánh giá các điều kiện Long/Short Entry để mở lệnh. Nếu có vị thế mở, kiểm tra điều kiện đảo chiều (Reversal).
-4. **Kết thúc phiên:** Tự động tất toán toàn bộ vị thế còn mở ở cây nến cuối cùng, ghi dữ liệu kết quả ra tệp tin JSON và gửi thống kê chi tiết về Telegram.
+To target favorable Risk-to-Reward (R:R) ratios on short-term price waves, the Baseline Bot enforces strict position limits:
+
+### A. Stop Loss (SL) Placement
+Stop losses are placed dynamically based on the entry trigger mechanism:
+*   **OB/FVG Entries**: The SL is set just beyond the boundaries of the triggering OB or FVG, including a small ATR cushion:
+    $$\text{SL}_{\text{Long}} = \text{OB/FVG Low} - 0.05 \times \text{ATR}$$
+    $$\text{SL}_{\text{Short}} = \text{OB/FVG High} + 0.05 \times \text{ATR}$$
+*   **Breakout Entries**: Placed at a fixed distance of $1.2 \times \text{ATR}$ from the entry price.
+
+### B. Take Profit (TP) Calibration
+*   **Default Target**: Set at a fixed $2.0 \times \text{ATR}$ distance from entry to capture short-term impulse movements.
+*   **Liquidity Sweeps (Swing Targets)**: If the system detects a historical swing high (for Longs) or low (for Shorts) within a $1.2 \times \text{ATR}$ to $3.0 \times \text{ATR}$ range, the TP order is aligned directly with that key level to exploit liquidity targets.
+
+### C. Immediate Position Reversal Rule
+If a trade is currently open (e.g., Long) but a valid entry trigger occurs in the opposite direction (e.g., Short):
+1.  The core script immediately closes the active Long position with the label: `"SMC Scalping Reversal opposite signal met"`.
+2.  It simultaneously opens the opposing Short trade on the same candle to capture order flow transitions.
+
+---
+
+## 5. Backtest Simulation Flow
+
+1.  **Initialization**: Ingests configuration values from the environment variables (Target symbol, Start/End dates, and starting capital).
+2.  **Historical Timeline Loop**:
+    *   Simulates price actions step-by-step using daily OHLCV bars.
+    *   At the start of each bar, calls the TP/SL check function (`check_stop_loss_take_profit()`) using high-low range criteria to settle active orders.
+3.  **Rule Execution**: If no position is open, the bot evaluates the entry logic arrays. If a position is active, it scans for reversal triggers.
+4.  **Termination**: Automatically liquidates any open positions on the final bar of the backtest, writes structured metrics to JSON, and sends reports to Telegram.
