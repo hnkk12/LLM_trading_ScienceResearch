@@ -32,3 +32,10 @@ data/
 # but KEEP the official paper baseline & LLM runs in data-backtest/ for reproducibility
 data-backtest/run-*
 data-backtest/cache/
+
+# Temporarily ignored for current focus
+dashboard.py
+test_log.py
+hyperliquid_client.py
+Dockerfile
+replay/
