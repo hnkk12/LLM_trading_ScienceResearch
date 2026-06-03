@@ -783,54 +783,95 @@ def main() -> None:
 
     logging.info("Backtest complete. Results written to %s", results_path)
 
-    # Send Telegram notification if enabled
-    if not cfg.disable_telegram and bot.TELEGRAM_BOT_TOKEN:
+    # Save daily returns to CSV
+    if 'daily_returns_series' in locals() and not daily_returns_series.empty:
+        daily_returns_series.to_csv(cfg.run_dir / "daily_returns.csv", header=["daily_return"])
+
+    # Save settings to settings.json
+    settings_data = {
+        "start": cfg.start.isoformat(),
+        "end": cfg.end.isoformat(),
+        "interval": cfg.interval,
+        "symbols": bot.SYMBOLS,
+        "start_capital": bot.START_CAPITAL,
+        "model": bot.LLM_MODEL_NAME,
+        "temperature": bot.LLM_TEMPERATURE,
+        "max_tokens": bot.LLM_MAX_TOKENS,
+        "slippage_mode": os.getenv("BACKTEST_SLIPPAGE_MODE", "S0"),
+        "spread_pct": float(os.getenv("BACKTEST_SPREAD_PCT", "0.0002")),
+        "fee_rate_taker": bot.TAKER_FEE_RATE,
+        "fee_rate_maker": bot.MAKER_FEE_RATE,
+    }
+    with open(cfg.run_dir / "settings.json", "w", encoding="utf-8") as sf:
+        json.dump(settings_data, sf, indent=2)
+
+    # Copy system prompt to prompt_template.txt
+    if cfg.system_prompt_file and Path(cfg.system_prompt_file).exists():
         try:
-            rf_val = recovery_factor if recovery_factor is not None else 0.0
-            pf_val = trade_stats['profit_factor'] if trade_stats['profit_factor'] is not None else 0.0
-            sharpe_val = sharpe if sharpe is not None else 0.0
-            sortino_val = sortino if sortino is not None else 0.0
-            max_dd_pct = (max_drawdown * 100) if max_drawdown is not None else 0.0
-            avg_holding = format_seconds(trade_stats['avg_holding_time_seconds'])
+            import shutil
+            shutil.copy(cfg.system_prompt_file, cfg.run_dir / "prompt_template.txt")
+        except Exception as e:
+            logging.warning("Failed to copy system prompt file: %s", e)
+    else:
+        try:
+            with open(cfg.run_dir / "prompt_template.txt", "w", encoding="utf-8") as pf:
+                pf.write(bot.TRADING_RULES_PROMPT)
+        except Exception as e:
+            logging.warning("Failed to write prompt_template.txt: %s", e)
+
+    # Generate summary text table and save to backtest_summary.txt
+    try:
+        rf_val = recovery_factor if recovery_factor is not None else 0.0
+        pf_val = trade_stats['profit_factor'] if trade_stats['profit_factor'] is not None else 0.0
+        sharpe_val = sharpe if sharpe is not None else 0.0
+        sortino_val = sortino if sortino is not None else 0.0
+        max_dd_pct = (max_drawdown * 100) if max_drawdown is not None else 0.0
+        avg_holding = format_seconds(trade_stats['avg_holding_time_seconds'])
+        
+        crisis_period = f"{cfg.start.strftime('%Y-%m-%d')} to {cfg.end.strftime('%Y-%m-%d')}"
+        
+        rows = [
+            ("Model", bot.LLM_MODEL_NAME),
+            ("Asset", ", ".join(bot.SYMBOLS)),
+            ("Crisis Period", crisis_period),
+            ("Initial Capital", f"${bot.START_CAPITAL:,.2f}"),
+            ("Final Capital", f"${final_equity:,.2f}"),
+            ("Net Profit", f"{'+' if total_net_profit >= 0 else '-'}${abs(total_net_profit):,.2f}"),
+            ("Return %", f"{total_return_pct:+.2f}%"),
+            ("Total Trades", str(trade_stats['total_trades'])),
+            ("Win Rate", f"{win_pct_total:.1f}%"),
+            ("Profit Factor", f"{pf_val:.2f}"),
+            ("Sharpe Ratio", f"{sharpe_val:.2f}"),
+            ("Sortino Ratio", f"{sortino_val:.2f}"),
+            ("Maximum Drawdown", f"{max_dd_pct:.2f}%"),
+            ("Recovery Factor", f"{rf_val:.2f}"),
+            ("VaR/CVaR (95%)", f"{var_95*100:.2f}% / {cvar_95*100:.2f}%"),
+            ("Avg Holding Time", avg_holding),
+        ]
+        
+        col1_w = max(len(r[0]) for r in rows) + 2
+        col2_w = max(len(str(r[1])) for r in rows) + 2
+        
+        border = f"+{'-' * col1_w}+{'-' * col2_w}+"
+        header = f"| {'Metric':<{col1_w-2}} | {'Value':<{col2_w-2}} |"
+        
+        table_lines = [border, header, border]
+        for m, v in rows:
+            table_lines.append(f"| {m:<{col1_w-2}} | {str(v):<{col2_w-2}} |")
+        table_lines.append(border)
+        table_str = "\n".join(table_lines)
+        
+        # Save to backtest_summary.txt
+        with open(cfg.run_dir / "backtest_summary.txt", "w", encoding="utf-8") as sf:
+            sf.write(table_str)
             
-            crisis_period = f"{cfg.start.strftime('%Y-%m-%d')} to {cfg.end.strftime('%Y-%m-%d')}"
-            
-            rows = [
-                ("Model", bot.LLM_MODEL_NAME),
-                ("Asset", ", ".join(bot.SYMBOLS)),
-                ("Crisis Period", crisis_period),
-                ("Initial Capital", f"${bot.START_CAPITAL:,.2f}"),
-                ("Final Capital", f"${final_equity:,.2f}"),
-                ("Net Profit", f"{'+' if total_net_profit >= 0 else '-'}${abs(total_net_profit):,.2f}"),
-                ("Return %", f"{total_return_pct:+.2f}%"),
-                ("Total Trades", str(trade_stats['total_trades'])),
-                ("Win Rate", f"{win_pct_total:.1f}%"),
-                ("Profit Factor", f"{pf_val:.2f}"),
-                ("Sharpe Ratio", f"{sharpe_val:.2f}"),
-                ("Sortino Ratio", f"{sortino_val:.2f}"),
-                ("Maximum Drawdown", f"{max_dd_pct:.2f}%"),
-                ("Recovery Factor", f"{rf_val:.2f}"),
-                ("VaR/CVaR (95%)", f"{var_95*100:.2f}% / {cvar_95*100:.2f}%"),
-                ("Avg Holding Time", avg_holding),
-            ]
-            
-            col1_w = max(len(r[0]) for r in rows) + 2
-            col2_w = max(len(str(r[1])) for r in rows) + 2
-            
-            border = f"+{'-' * col1_w}+{'-' * col2_w}+"
-            header = f"| {'Metric':<{col1_w-2}} | {'Value':<{col2_w-2}} |"
-            
-            table_lines = [border, header, border]
-            for m, v in rows:
-                table_lines.append(f"| {m:<{col1_w-2}} | {str(v):<{col2_w-2}} |")
-            table_lines.append(border)
-            table_str = "\n".join(table_lines)
-            
+        # Send Telegram notification if enabled
+        if not cfg.disable_telegram and bot.TELEGRAM_BOT_TOKEN:
             msg = f"📊 *Backtest Research Summary*\n```\n{table_str}\n```"
             bot.send_telegram_message(msg)
             logging.info("Sent backtest summary to Telegram.")
-        except Exception as exc:
-            logging.warning("Failed to send Telegram summary: %s", exc)
+    except Exception as exc:
+        logging.warning("Failed to generate or send backtest summary: %s", exc)
 
 
 if __name__ == "__main__":

@@ -2326,12 +2326,18 @@ def execute_entry(coin: str, decision: Dict[str, Any], current_price: float) -> 
     symbol = COIN_TO_SYMBOL.get(coin)
     entry_price = current_price
     if is_backtest and symbol:
-        slippage_factor = float(os.getenv("BACKTEST_SLIPPAGE_FACTOR", "0.1"))
+        slippage_mode = os.getenv("BACKTEST_SLIPPAGE_MODE", "S0").upper()
         spread_pct = float(os.getenv("BACKTEST_SPREAD_PCT", "0.0002"))
-        data = fetch_market_data(symbol)
-        atr = data.get("atr", 0.0) if data else 0.0
-        slippage = slippage_factor * atr
         spread = current_price * spread_pct
+        if slippage_mode == "S1":
+            slippage = current_price * 0.0005
+        elif slippage_mode == "S2":
+            slippage = current_price * 0.0010
+        else:
+            slippage_factor = float(os.getenv("BACKTEST_SLIPPAGE_FACTOR", "0.1"))
+            data = fetch_market_data(symbol)
+            atr = data.get("atr", 0.0) if data else 0.0
+            slippage = slippage_factor * atr
         if side == 'long':
             entry_price = current_price + slippage + 0.5 * spread
         else:
@@ -2678,12 +2684,18 @@ def execute_close(coin: str, decision: Dict[str, Any], current_price: float) -> 
     symbol = COIN_TO_SYMBOL.get(coin)
     exit_price = current_price
     if is_backtest and symbol:
-        slippage_factor = float(os.getenv("BACKTEST_SLIPPAGE_FACTOR", "0.1"))
+        slippage_mode = os.getenv("BACKTEST_SLIPPAGE_MODE", "S0").upper()
         spread_pct = float(os.getenv("BACKTEST_SPREAD_PCT", "0.0002"))
-        data = fetch_market_data(symbol)
-        atr = data.get("atr", 0.0) if data else 0.0
-        slippage = slippage_factor * atr
         spread = current_price * spread_pct
+        if slippage_mode == "S1":
+            slippage = current_price * 0.0005
+        elif slippage_mode == "S2":
+            slippage = current_price * 0.0010
+        else:
+            slippage_factor = float(os.getenv("BACKTEST_SLIPPAGE_FACTOR", "0.1"))
+            data = fetch_market_data(symbol)
+            atr = data.get("atr", 0.0) if data else 0.0
+            slippage = slippage_factor * atr
         if pos["side"].lower() == "long":
             exit_price = current_price - slippage - 0.5 * spread
         else:

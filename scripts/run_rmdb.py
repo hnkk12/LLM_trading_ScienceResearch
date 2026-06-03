@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """
-Rule-Based Baseline Trading Bot for backtesting evaluation.
+Risk-Managed Deterministic Baseline (RMDB) Trading Bot for backtesting evaluation.
 Reuses the exact same dataset loader, timeline simulation, slippage, and fee models
-as backtest.py, but makes decisions using deterministic rules:
-- Long Entry: Price > EMA20 and RSI > 50 and MACD > MACD Signal
-- Short Entry: Price < EMA20 and RSI < 50 and MACD < MACD Signal
-- Stop Loss: 2x ATR from entry
-- Profit Target: 3x ATR from entry
-- Exits: TP/SL hits, or opposite signals generating reversal entries
+as run_baseline.py and backtest.py, but incorporates the exact same risk settings
+as Llama:
+- Risk 1% (halved to 0.5% in Yellow Zone, 0% in Red Zone)
+- ATR gate / Volatility-Adaptive Risk Zones (Green/Yellow/Red)
+- Cùng fee, slippage, asset, period và timeframe.
 """
 
 import os
@@ -331,7 +330,7 @@ def main() -> None:
     configure_environment(cfg)
 
     import bot
-    bot.LLM_MODEL_NAME = "Rule-Based Baseline"
+    bot.LLM_MODEL_NAME = "Risk-Managed Deterministic Baseline"
     bot.LLM_TEMPERATURE = 0.0
 
     # Override symbols if provided in environment
@@ -391,7 +390,7 @@ def main() -> None:
 
     interval_seconds = int(interval_to_timedelta(cfg.interval).total_seconds())
 
-    logging.info("Starting Baseline Backtest on %s | Capital: $%.2f", ", ".join(bot.SYMBOLS), bot.START_CAPITAL)
+    logging.info("Starting RMDB Backtest on %s | Capital: $%.2f", ", ".join(bot.SYMBOLS), bot.START_CAPITAL)
 
     for idx, timestamp_ms in enumerate(timeline, start=1):
         time_holder["value"] = int(timestamp_ms)
@@ -407,7 +406,7 @@ def main() -> None:
             coin = bot.SYMBOL_TO_COIN.get(symbol, symbol)
             
             # Fetch execution klines directly from client to get full DataFrame
-            klines_exec = bot.client.get_klines(symbol, cfg.interval, limit=100)
+            klines_exec = bot.client.get_klines(symbol, cfg.interval, limit=120)
             if not klines_exec or len(klines_exec) < 20:
                 continue
                 
@@ -417,12 +416,26 @@ def main() -> None:
             # Calculate indicators using bot functions
             df_exec = bot.add_indicator_columns(df_exec, ema_lengths=(20, 50))
             df_exec["atr"] = bot.calculate_atr_series(df_exec, 14)
+            df_exec["atr_long"] = bot.calculate_atr_series(df_exec, 100)
             
             latest_row = df_exec.iloc[-1]
             price = float(latest_row["close"])
             ema20 = float(latest_row["ema20"])
             ema50 = float(latest_row["ema50"])
             atr = float(latest_row["atr"]) if not pd.isna(latest_row["atr"]) else 0.0
+            atr_long = float(latest_row["atr_long"]) if not pd.isna(latest_row["atr_long"]) else 0.0
+            
+            # 3. Volatility Ratio & Zone Classification
+            vr = atr / atr_long if atr_long > 0 else 1.0
+            if vr < 1.6:
+                vr_zone = "GREEN"
+                risk_pct = 0.01  # Strict 1% risk
+            elif vr <= 2.2:
+                vr_zone = "YELLOW"
+                risk_pct = 0.005  # 50% reduced position size/risk (0.5%)
+            else:
+                vr_zone = "RED"
+                risk_pct = 0.0  # Suspend entries (0%)
             
             # Detect patterns and structure
             patterns = detect_candlestick_patterns(df_exec, num_candles=2)
@@ -476,15 +489,43 @@ def main() -> None:
             is_bullish_breakout = (ms["last_break_type"] == "BOS") and (ms["last_break_direction"] == "Bullish") and (volume_ratio > 1.2)
             is_bearish_breakout = (ms["last_break_type"] == "BOS") and (ms["last_break_direction"] == "Bearish") and (volume_ratio > 1.2)
             
-            long_entry_condition = trend_bullish and (mitigates_bullish_ob or mitigates_bullish_fvg or is_bullish_breakout)
-            short_entry_condition = trend_bearish and (mitigates_bearish_ob or mitigates_bearish_fvg or is_bearish_breakout)
+            # Stricter Confluences for Yellow Zone (3+ factors: trend + trigger + RSI/MACD confirm)
+            yellow_long_confluence = True
+            yellow_short_confluence = True
+            if vr_zone == "YELLOW":
+                rsi14 = float(latest_row["rsi14"]) if "rsi14" in latest_row and not pd.isna(latest_row["rsi14"]) else 50.0
+                macd = float(latest_row["macd"]) if "macd" in latest_row and not pd.isna(latest_row["macd"]) else 0.0
+                macd_signal = float(latest_row["macd_signal"]) if "macd_signal" in latest_row and not pd.isna(latest_row["macd_signal"]) else 0.0
+                yellow_long_confluence = (rsi14 > 50) or (macd > macd_signal)
+                yellow_short_confluence = (rsi14 < 50) or (macd < macd_signal)
+            
+            # ATR Gate (Anti-Chasing: no entry if price moved > 2 ATRs from trigger breakout level)
+            is_long_chasing = False
+            is_short_chasing = False
+            if is_bullish_breakout:
+                breakout_ref = ms["swing_high"]
+                if breakout_ref and price - breakout_ref > 2 * atr:
+                    is_long_chasing = True
+            if is_bearish_breakout:
+                breakout_ref = ms["swing_low"]
+                if breakout_ref and breakout_ref - price > 2 * atr:
+                    is_short_chasing = True
+            
+            # Final Entry Signals
+            if vr_zone == "RED":
+                long_entry_condition = False
+                short_entry_condition = False
+            else:
+                long_entry_condition = trend_bullish and (mitigates_bullish_ob or mitigates_bullish_fvg or is_bullish_breakout) and yellow_long_confluence and not is_long_chasing
+                short_entry_condition = trend_bearish and (mitigates_bearish_ob or mitigates_bearish_fvg or is_bearish_breakout) and yellow_short_confluence and not is_short_chasing
             
             # Retrieve active position
             pos = bot.positions.get(coin)
+            risk_usd = bot.balance * risk_pct
             
             if pos is None:
                 # No active position: Evaluate entries
-                if long_entry_condition:
+                if long_entry_condition and risk_usd > 0:
                     # SL placement: tight SL (0.05x ATR) below OB/FVG, or default to 1.2x ATR
                     sl_ref = price - 1.2 * atr if atr > 0 else price * 0.99
                     trigger_source = "1.2x ATR"
@@ -510,17 +551,17 @@ def main() -> None:
                         "action": "entry",
                         "side": "long",
                         "leverage": 10.0,
-                        "risk_usd": bot.balance * 0.01,
+                        "risk_usd": risk_usd,
                         "stop_loss": stop_loss,
                         "profit_target": profit_target,
-                        "justification": f"SMC Scalping Long. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
-                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bullish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "justification": f"RMDB SMC Long ({vr_zone} Zone, VR: {vr:.2f}). Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bullish_breakout else "BOS_breakout", ms["structure_status"], f"Zone_{vr_zone}"],
                         "trigger_tags": ["OB_mitigation"] if mitigates_bullish_ob else (["FVG_mitigation"] if mitigates_bullish_fvg else ["BOS_breakout"]),
-                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markup"]
+                        "reasoning_categories": ["SMC", "Scalping", "Risk_Managed"]
                     }
                     bot.execute_entry(coin, decision, price)
                     
-                elif short_entry_condition:
+                elif short_entry_condition and risk_usd > 0:
                     # SL placement: tight SL (0.05x ATR) above OB/FVG, or default to 1.2x ATR
                     sl_ref = price + 1.2 * atr if atr > 0 else price * 1.01
                     trigger_source = "1.2x ATR"
@@ -546,19 +587,19 @@ def main() -> None:
                         "action": "entry",
                         "side": "short",
                         "leverage": 10.0,
-                        "risk_usd": bot.balance * 0.01,
+                        "risk_usd": risk_usd,
                         "stop_loss": stop_loss,
                         "profit_target": profit_target,
-                        "justification": f"SMC Scalping Short. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
-                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bearish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "justification": f"RMDB SMC Short ({vr_zone} Zone, VR: {vr:.2f}). Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bearish_breakout else "BOS_breakout", ms["structure_status"], f"Zone_{vr_zone}"],
                         "trigger_tags": ["OB_mitigation"] if mitigates_bearish_ob else (["FVG_mitigation"] if mitigates_bearish_fvg else ["BOS_breakout"]),
-                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markdown"]
+                        "reasoning_categories": ["SMC", "Scalping", "Risk_Managed"]
                     }
                     bot.execute_entry(coin, decision, price)
             else:
-                # Active position: Check for reversals
+                # Active position: Check for reversals (Only reverse if we are not in RED zone)
                 pos_side = pos["side"].lower()
-                if pos_side == "long" and short_entry_condition:
+                if pos_side == "long" and short_entry_condition and risk_usd > 0:
                     close_dec = {
                         "coin": coin,
                         "action": "close",
@@ -589,17 +630,17 @@ def main() -> None:
                         "action": "entry",
                         "side": "short",
                         "leverage": 10.0,
-                        "risk_usd": bot.balance * 0.01,
+                        "risk_usd": risk_usd,
                         "stop_loss": stop_loss,
                         "profit_target": profit_target,
                         "justification": f"Reversal short entry rule met. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
-                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bearish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bearish_breakout else "BOS_breakout", ms["structure_status"], f"Zone_{vr_zone}"],
                         "trigger_tags": ["OB_mitigation"] if mitigates_bearish_ob else (["FVG_mitigation"] if mitigates_bearish_fvg else ["BOS_breakout"]),
-                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markdown"]
+                        "reasoning_categories": ["SMC", "Scalping", "Risk_Managed"]
                     }
                     bot.execute_entry(coin, decision, price)
                     
-                elif pos_side == "short" and long_entry_condition:
+                elif pos_side == "short" and long_entry_condition and risk_usd > 0:
                     close_dec = {
                         "coin": coin,
                         "action": "close",
@@ -630,13 +671,13 @@ def main() -> None:
                         "action": "entry",
                         "side": "long",
                         "leverage": 10.0,
-                        "risk_usd": bot.balance * 0.01,
+                        "risk_usd": risk_usd,
                         "stop_loss": stop_loss,
                         "profit_target": profit_target,
                         "justification": f"Reversal long entry rule met. Trigger: {trigger_source}, Target: ${profit_target:.2f}, Stop: ${stop_loss:.2f}",
-                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bullish_breakout else "BOS_breakout", ms["structure_status"]],
+                        "confluence_tags": ["SMC_scalping", "OB_FVG_limit" if not is_bullish_breakout else "BOS_breakout", ms["structure_status"], f"Zone_{vr_zone}"],
                         "trigger_tags": ["OB_mitigation"] if mitigates_bullish_ob else (["FVG_mitigation"] if mitigates_bullish_fvg else ["BOS_breakout"]),
-                        "reasoning_categories": ["SMC", "Scalping", "Wyckoff_Markup"]
+                        "reasoning_categories": ["SMC", "Scalping", "Risk_Managed"]
                     }
                     bot.execute_entry(coin, decision, price)
 
@@ -646,12 +687,14 @@ def main() -> None:
 
         if idx % 50 == 0 or idx == len(timeline):
             logging.info(
-                "Processed bar %d/%d at %s | Equity: %.2f | Positions: %d",
+                "Processed bar %d/%d at %s | Equity: %.2f | Positions: %d | VR Zone: %s (VR: %.2f)",
                 idx,
                 len(timeline),
                 simulated_time().isoformat(),
                 total_equity,
-                len(bot.positions)
+                len(bot.positions),
+                vr_zone,
+                vr
             )
 
     # Force close remaining positions at end
@@ -748,16 +791,16 @@ def main() -> None:
         "daily_returns": daily_returns,
         "equity_history": bot.equity_history,
         "llm": {
-            "model": "Rule-Based Baseline",
+            "model": "Risk-Managed Deterministic Baseline",
             "temperature": 0.0,
             "max_tokens": None,
             "thinking": None,
             "system_prompt": {
-                "source": "deterministic_rules",
+                "source": "deterministic_rmdb_rules",
                 "file": None,
                 "override": False,
-                "preview": "SMC + Price Action + Wyckoff Rule-Based Baseline",
-                "full": "Long if trend is bullish (BOS/CHoCH) and price mitigates Bullish OB/FVG and Bullish Pinbar/Engulfing trigger. Short if trend is bearish and price mitigates Bearish OB/FVG and Bearish Pinbar/Engulfing trigger. SL dynamically placed at OB/FVG boundary, TP at Swing High/Low liquidity pool.",
+                "preview": "SMC + Wyckoff + Volatility Zones RMDB Baseline",
+                "full": "RMDB Baseline: 1% risk in Green Zone, 0.5% risk in Yellow Zone with stricter confluences, 0% risk (suspend entries) in Red Zone. Also applies ATR gate / Anti-Chasing to ignore breakouts closing too far.",
             },
         },
         "trading": trade_stats,
@@ -768,7 +811,7 @@ def main() -> None:
     with open(results_path, "w", encoding='utf-8') as fh:
         json.dump(results, fh, indent=2)
 
-    logging.info("Baseline backtest complete. Results written to %s", results_path)
+    logging.info("RMDB backtest complete. Results written to %s", results_path)
 
     # Save daily returns to CSV
     if 'daily_returns_series' in locals() and not daily_returns_series.empty:
@@ -781,7 +824,7 @@ def main() -> None:
         "interval": cfg.interval,
         "symbols": bot.SYMBOLS,
         "start_capital": bot.START_CAPITAL,
-        "model": "Rule-Based Baseline",
+        "model": "Risk-Managed Deterministic Baseline",
         "temperature": 0.0,
         "max_tokens": 0,
         "slippage_mode": os.getenv("BACKTEST_SLIPPAGE_MODE", "S0"),
@@ -792,10 +835,10 @@ def main() -> None:
     with open(cfg.run_dir / "settings.json", "w", encoding="utf-8") as sf:
         json.dump(settings_data, sf, indent=2)
 
-    # Save baseline explanation to prompt_template.txt
+    # Save explanation to prompt_template.txt
     try:
         with open(cfg.run_dir / "prompt_template.txt", "w", encoding="utf-8") as pf:
-            pf.write("Rule-Based Baseline (SMC + Wyckoff + Price Action). No LLM used.")
+            pf.write("Risk-Managed Deterministic Baseline (RMDB). No LLM used. 1% Risk, Green/Yellow/Red Zones, ATR Gate.")
     except Exception as e:
         logging.warning("Failed to write prompt_template.txt: %s", e)
 
@@ -811,7 +854,7 @@ def main() -> None:
         crisis_period = f"{cfg.start.strftime('%Y-%m-%d')} to {cfg.end.strftime('%Y-%m-%d')}"
         
         rows = [
-            ("Model", "Rule-Based Baseline"),
+            ("Model", "RMDB"),
             ("Asset", ", ".join(bot.SYMBOLS)),
             ("Crisis Period", crisis_period),
             ("Initial Capital", f"${bot.START_CAPITAL:,.2f}"),
@@ -847,11 +890,11 @@ def main() -> None:
             
         # Send Telegram notification if enabled
         if not cfg.disable_telegram and bot.TELEGRAM_BOT_TOKEN:
-            msg = f"📊 *Baseline Backtest Research Summary*\n```\n{table_str}\n```"
+            msg = f"📊 *RMDB Backtest Research Summary*\n```\n{table_str}\n```"
             bot.send_telegram_message(msg)
-            logging.info("Sent baseline summary to Telegram.")
+            logging.info("Sent RMDB summary to Telegram.")
     except Exception as exc:
-        logging.warning("Failed to generate or send baseline summary: %s", exc)
+        logging.warning("Failed to generate or send RMDB summary: %s", exc)
 
 if __name__ == "__main__":
     main()
