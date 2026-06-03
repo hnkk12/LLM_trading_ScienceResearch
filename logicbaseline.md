@@ -1,6 +1,6 @@
 # Logic Baseline - Rule-Based Trading Bot (Detailed Technical Specification)
 
-This document presents the detailed architectural design, technical analysis algorithms (SMC, Wyckoff, Price Action), scalping entry/exit rules, and simulation processes of the deterministic rule-based Baseline Bot ([run_baseline.py](scripts/run_baseline.py)).
+This document presents the detailed architectural design, technical analysis algorithms (SMC, Wyckoff, Price Action), scalping entry/exit rules, and simulation processes of the deterministic rule-based Baseline Bot (`scripts/run_baseline.py`).
 
 ---
 
@@ -91,29 +91,43 @@ graph TD
 
 ---
 
-## 4. Position, Take Profit & Stop Loss Management
+## 4. Position, Risk, & Take Profit/Stop Loss Management
 
-To target favorable Risk-to-Reward (R:R) ratios on short-term price waves, the Baseline Bot enforces strict position limits:
+### A. Position Sizing & 1% Risk Allocation
+The Baseline Bot is configured with a **strict 1% risk rule** to align with the experimental framework of the AI Bot and the RMDB Bot.
+1.  **Risk USD**: Calculated dynamically as:
+    $$\text{Risk USD} = \text{Available Balance} \times 0.01$$
+2.  **Order Quantity**:
+    $$\text{Quantity} = \frac{\text{Risk USD}}{|\text{Entry Price} - \text{Stop Loss Price}|}$$
 
-### A. Stop Loss (SL) Placement
+### B. Stop Loss (SL) Placement
 Stop losses are placed dynamically based on the entry trigger mechanism:
 *   **OB/FVG Entries**: The SL is set just beyond the boundaries of the triggering OB or FVG, including a small ATR cushion:
     $$\text{SL}_{\text{Long}} = \text{OB/FVG Low} - 0.05 \times \text{ATR}$$
     $$\text{SL}_{\text{Short}} = \text{OB/FVG High} + 0.05 \times \text{ATR}$$
 *   **Breakout Entries**: Placed at a fixed distance of $1.2 \times \text{ATR}$ from the entry price.
 
-### B. Take Profit (TP) Calibration
+### C. Take Profit (TP) Calibration
 *   **Default Target**: Set at a fixed $2.0 \times \text{ATR}$ distance from entry to capture short-term impulse movements.
 *   **Liquidity Sweeps (Swing Targets)**: If the system detects a historical swing high (for Longs) or low (for Shorts) within a $1.2 \times \text{ATR}$ to $3.0 \times \text{ATR}$ range, the TP order is aligned directly with that key level to exploit liquidity targets.
 
-### C. Immediate Position Reversal Rule
+### D. Immediate Position Reversal Rule
 If a trade is currently open (e.g., Long) but a valid entry trigger occurs in the opposite direction (e.g., Short):
 1.  The core script immediately closes the active Long position with the label: `"SMC Scalping Reversal opposite signal met"`.
-2.  It simultaneously opens the opposing Short trade on the same candle to capture order flow transitions.
+2.  It simultaneously opens the opposing Short trade on the same daily candle to capture order flow transitions.
 
 ---
 
-## 5. Backtest Simulation Flow
+## 5. Percentage-Based Slippage Robustness (S0, S1, S2)
+
+To ensure comparability with the AI trading framework, the Baseline Bot executes transactions using the configured environment slippage parameters:
+*   **S0 (Dynamic ATR-based Slippage)**: Slippage = $0.1 \times \text{ATR} + 0.5 \times \text{Spread}$.
+*   **S1 (Fixed 0.05% Slippage)**: Slippage = $0.05\% \times \text{Price} + 0.5 \times \text{Spread}$.
+*   **S2 (Fixed 0.10% Slippage)**: Slippage = $0.10\% \times \text{Price} + 0.5 \times \text{Spread}$.
+
+---
+
+## 6. Backtest Simulation Flow
 
 1.  **Initialization**: Ingests configuration values from the environment variables (Target symbol, Start/End dates, and starting capital).
 2.  **Historical Timeline Loop**:

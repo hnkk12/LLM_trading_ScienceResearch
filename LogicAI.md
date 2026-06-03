@@ -1,18 +1,18 @@
 # Logic AI - Trading Bot (Detailed Technical Specification)
 
-This document presents the detailed architectural design, event-driven activation mechanism, input/output data structures, and trade/risk management rules of the Large Language Model (LLM) trading bot.
+This document presents the detailed architectural design, event-driven activation mechanism, input/output data structures, and trade/risk management rules of the Large Language Model (LLM) trading bot (`backtest.py` and `bot.py`).
 
 ---
 
 ## 1. Architecture Overview & Operating Mechanism
 
-The bot is designed as a **Swing Trader integrated with an Active Guardian Risk Management Overlay**. The AI acts as the reasoning and decision-making engine, while the Python core system is responsible for data ingestion, technical indicator calculation, position sizing, order execution, and logging.
+The bot is designed as a **Swing Trader integrated with an Active Guardian Risk Management Overlay**. The AI acts as the qualitative reasoning and decision-making engine, while the Python core system is responsible for data ingestion, technical indicator calculation, position sizing, order execution, and logging.
 
 ### Basic Workflow:
-1. **Data Collection**: The bot ingests market data (from historical CSV files during backtesting, or the exchange API during live trading) at the **1D** interval.
-2. **Event-Driven AI Activation**: The Python core checks if current market conditions meet the criteria to "wake up" the AI. If met, the core packages the prompt and calls the LLM API.
+1. **Data Ingestion**: The bot ingests market data (from historical CSV files during backtesting, or the exchange API during live trading) at the **1D** (daily) interval.
+2. **Event-Driven AI Activation**: The Python core checks if current market conditions meet the criteria to "wake up" the AI. If met, the core packages the prompt and calls the LLM API (OpenRouter).
 3. **Analysis & Response**: The LLM receives a structured prompt containing indicators, market structure data, and portfolio states. It performs chain-of-thought reasoning and returns a structured JSON decision.
-4. **Order Execution**: The core processes the JSON response to enter a position (`entry`), close a position (`close`), or modify stop-loss/take-profit parameters (`hold`/`trail`).
+4. **Order Execution**: The core processes the JSON response to enter a position (`entry`), close a position (`close`), or modify parameters (`hold`).
 5. **Logging & Reporting**: Automatically records logs into `ai_decisions.csv`, `trade_history.csv`, and sends real-time status alerts via Telegram.
 
 ---
@@ -22,7 +22,7 @@ The bot is designed as a **Swing Trader integrated with an Active Guardian Risk 
 To optimize API latency and reduce token costs during consolidations (sideways markets), the bot employs an event-driven activation mechanism. The LLM is **only invoked (woken up)** when at least one of the following conditions is satisfied:
 
 *   **Condition A (Active Position Management)**: If the portfolio has any open positions, the AI is called on every new bar to monitor the position, adjust trailing stops, or execute early closures.
-*   **Condition B (Significant Price Volatility)**: The closing price of the current candle changes by $\ge 0.8\%$ compared to the previous candle's close for any tracked asset.
+*   **Condition B (Significant Price Volatility)**: The closing price of the current daily candle changes by $\ge 0.8\%$ compared to the previous candle's close for any tracked asset.
 *   **Condition C (RSI Extremes / Momentum Reversal)**: The 14-period RSI enters extreme zones ($\text{RSI} < 35$ or $\text{RSI} > 65$), signaling potential trend exhaustion or reversal.
 *   **Condition D (Boundary Bars)**: The first bar (to establish initial strategy) and the final bar (to liquidate all remaining holdings) of the simulation run always trigger the AI.
 
@@ -36,7 +36,7 @@ To optimize API latency and reduce token costs during consolidations (sideways m
 Upon activation, the core compiles the market metrics and account states into a detailed text prompt. The context elements include:
 
 ### A. Strategic Guidelines (System Prompt)
-Defines the trading persona (e.g., Active Guardian, Sniper, or Aggressive), core position sizing rules (Strict 1% Risk), leverage parameters, volatility ratio definitions, and risk-zone containment protocols.
+Defines the trading persona (e.g., Active Guardian), core position sizing rules (Strict 1% Risk), leverage parameters, volatility ratio definitions, and risk-zone containment protocols.
 
 ### B. Account & Portfolio State
 *   **Available Cash**: The cash balance available to meet margin requirements.
@@ -81,15 +81,21 @@ The order quantity and required margin are computed dynamically by the Python co
 
 ### C. Market Risk Zones
 Using the **Volatility Ratio (VR = Short-term ATR / Long-term ATR)**, the system divides the market into three operational risk zones:
-*   **Green Zone ($VR < 1.6$ - Stable)**: Low-to-moderate volatility. The AI is permitted to execute entry orders using standard **2-factor confluences**.
-*   **Yellow Zone ($VR \in [1.6, 2.2]$ - Volatile)**: High volatility. The AI requires at least **3-factor confluences** to enter trades, and position size is automatically halved (capping trade risk to 0.5%).
-*   **Red Zone ($VR > 2.2$ - Extreme)**: Severe volatility or drawdowns. The core **suspends all new trade entries** and instructs the AI to focus entirely on managing and trailing active positions.
+*   **Green Zone ($VR < 1.6$ - Active)**: Stable market conditions; standard entry confluences (2 factors) applied. Risks **1% of Balance**.
+*   **Yellow Zone ($VR \in [1.6, 2.2]$ - Defensive)**: Volatile market; requires stricter confluences (3+ factors) and halves position sizes (capping trade risk to **0.5% of Balance**).
+*   **Red Zone ($VR > 2.2$ - Pause)**: Extreme market stress; **suspends all new trade entries** and instructs the AI to focus entirely on managing and trailing active positions.
+
+### D. Drawdown Protection
+If the account net balance drops by $3\%$ within a rolling week, all entry gates are automatically tightened to "Red Zone" (Pause) mode, stopping any new trade entries.
+
+### E. Anti-Chasing Logic
+The AI is instructed to never enter a trade if the price has already moved more than **2 ATRs** away from the original breakout/signal trigger level.
 
 ---
 
 ## 5. Position & In-Trade Management
 
-Once a position is active, the bot maintains dual-layered monitoring via the core script and the LLM:
+Once a position is active, the bot maintains dual-layered monitoring:
 
 ### A. Intrabar TP/SL Settlement (Zero API Cost)
 At each new price bar, before activating the AI, the core checks the High/Low range of the previous candle:
@@ -99,15 +105,36 @@ At each new price bar, before activating the AI, the core checks the High/Low ra
 ### B. Trailing Stop Management
 When the AI outputs a `hold` decision, it can propose an adjusted Stop Loss level:
 *   **Safety Restriction**: The core only accepts the new Stop Loss if it reduces the overall risk of the position (i.e., increasing SL for Long positions, decreasing SL for Short positions). If the AI attempts to widen the stop loss, the core rejects the adjustment and retains the previous level.
+*   **The 20% Rule**: If the price comes within **20%** of the stop loss, the AI is forbidden from executing a manual close. It must let the stop-loss order do its job to prevent emotional panic exits.
 
 ### C. Fast Early Exit
-If the AI detects a structural trend reversal or determines that a trade is failing to gain momentum after 3 candles, it can output a `close` signal to execute an early exit and limit capital impairment.
+If the AI detects a structural trend reversal or determines that a trade is failing to gain momentum after **3 bars**, it can output a `close` signal to execute an early exit and limit capital impairment.
 
 ---
 
-## 6. Output Data Structure (LLM Response Schema)
+## 6. Percentage-Based Slippage Robustness (S0, S1, S2)
 
-The LLM must respond with a single, structured JSON document containing the trade decision for the evaluated assets:
+During backtesting, execution prices are adjusted to account for slippage and spread based on the `BACKTEST_SLIPPAGE_MODE` environment variable:
+
+*   **S0 (Dynamic ATR-based Slippage)**: Default mode. Slippage is derived dynamically from market volatility.
+    *   $\text{Slippage} = 0.1 \times \text{ATR}$
+    *   $\text{Spread} = \text{Current Price} \times \text{Spread Percentage}$ (default 0.02%)
+    *   $\text{Entry Price}_{\text{Long}} = \text{Current Price} + \text{Slippage} + 0.5 \times \text{Spread}$
+    *   $\text{Exit Price}_{\text{Long}} = \text{Current Price} - \text{Slippage} - 0.5 \times \text{Spread}$
+*   **S1 (Fixed 0.05% Slippage)**: Simulates standard market slippage.
+    *   $\text{Slippage} = \text{Current Price} \times 0.0005$
+    *   $\text{Entry Price}_{\text{Long}} = \text{Current Price} + \text{Slippage} + 0.5 \times \text{Spread}$
+    *   $\text{Exit Price}_{\text{Long}} = \text{Current Price} - \text{Slippage} - 0.5 \times \text{Spread}$
+*   **S2 (Fixed 0.10% Slippage)**: Simulates high-slippage market stress.
+    *   $\text{Slippage} = \text{Current Price} \times 0.0010$
+    *   $\text{Entry Price}_{\text{Long}} = \text{Current Price} + \text{Slippage} + 0.5 \times \text{Spread}$
+    *   $\text{Exit Price}_{\text{Long}} = \text{Current Price} - \text{Slippage} - 0.5 \times \text{Spread}$
+
+---
+
+## 7. Output Data Structure (LLM Response Schema)
+
+The LLM must respond with a single, structured JSON document containing the trade decision:
 
 ```json
 {
@@ -121,24 +148,21 @@ The LLM must respond with a single, structured JSON document containing the trad
     "confidence": 0.85,
     "risk_usd": 10.0,
     "market_mode": "Active|Defensive|Pause",
-    "justification": "Detailed natural language reasoning analyzing technical indicators and market structure.",
-    "confluence_tags": ["EMA Crossover", "RSI Support"],
-    "trigger_tags": ["RSI Bounce"],
-    "reasoning_categories": ["Trend Following"]
+    "justification": "Detailed natural language reasoning analyzing technical indicators and market structure."
   }
 }
 ```
 
 ### JSON Fields Explanation:
 *   **`signal`**: The requested action.
-    *   `entry`: Initiate a new position (valid only if no open position exists for the asset).
+    *   `entry`: Initiate a new position (valid only if no open position exists).
     *   `close`: Liquidate the current position.
     *   `hold`: Keep the position open (allows stop loss updates).
-    *   `reject`: Take no action (or bypass potential opportunities due to risk).
+    *   `reject`: Take no action (bypass opportunity due to high risk).
 *   **`side`**: Trade direction (`long` or `short`).
-*   **`quantity`**: Recommended order size (processed by core formulas).
+*   **`quantity`**: Recommended order size (processed and verified by core formulas).
 *   **`profit_target`**: The target Take Profit price.
 *   **`stop_loss`**: The protection Stop Loss price.
 *   **`leverage`**: Leverage multiplier (e.g., `5`, `10`).
-*   **`risk_usd`**: Cash value at risk (matches the 1% parameter).
+*   **`risk_usd`**: Dollar value at risk (must align with the 1% parameter).
 *   **`justification`**: Chain-of-thought analysis explaining the trade logic.
