@@ -1,0 +1,17 @@
+{
+  "balance": 1098.2146498026898,
+  "positions": {},
+  "performance": {
+    "total_net_profit": 98.21464980268979,
+    "total_return_pct": 9.82146498026898,
+    "max_drawdown_pct": 5.572479910360017,
+    "recovery_factor": 1.762494461758311,
+    "profit_factor": 1.5086337309848625,
+    "win_rate_pct": 47.22222222222222,
+    "total_trades": 36,
+    "winning_trades": 17,
+    "losing_trades": 19
+  },
+  "iteration": 505,
+  "updated_at": "2009-12-31T00:00:00+00:00"
+}

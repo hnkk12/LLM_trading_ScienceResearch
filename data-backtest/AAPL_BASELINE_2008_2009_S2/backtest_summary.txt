@@ -1,0 +1,20 @@
++------------------+--------------------------+
+| Metric           | Value                    |
++------------------+--------------------------+
+| Model            | Rule-Based Baseline      |
+| Asset            | AAPL                     |
+| Crisis Period    | 2008-01-01 to 2009-12-31 |
+| Initial Capital  | $1,000.00                |
+| Final Capital    | $1,086.24                |
+| Net Profit       | +$86.24                  |
+| Return %         | +8.62%                   |
+| Total Trades     | 36                       |
+| Win Rate         | 47.2%                    |
+| Profit Factor    | 1.44                     |
+| Sharpe Ratio     | 0.95                     |
+| Sortino Ratio    | 1.39                     |
+| Maximum Drawdown | 5.79%                    |
+| Recovery Factor  | 1.49                     |
+| VaR/CVaR (95%)   | 0.43% / 0.77%            |
+| Avg Holding Time | 8.3d                     |
++------------------+--------------------------+
