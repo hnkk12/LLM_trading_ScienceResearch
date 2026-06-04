@@ -1,15 +1,16 @@
 # LLM Multi-Asset Trading & Risk Governance Framework
 
-An event-driven backtesting and live execution framework built to evaluate Large Language Models (LLMs) as adaptive trading agents and risk governors, compared against a deterministic Smart Money Concepts (SMC) rule-based baseline and a hybrid Risk-Managed Deterministic Baseline (RMDB).
+An event-driven backtesting and live execution framework built to evaluate Large Language Models (LLMs) as adaptive trading agents and risk governors, compared against a deterministic Smart Money Concepts (SMC) rule-based baseline, a hybrid Risk-Managed Deterministic Baseline (RMDB), and a supervised machine learning baseline (XGBoost).
 
 ---
 
 ## 🚀 Key Features
 
-*   **Three Execution Systems**:
+*   **Four Execution Systems**:
     *   **AI Agent Mode ([bot.py](bot.py) & [backtest.py](backtest.py))**: Integrates state-of-the-art LLMs (Llama, Gemini) with a structured reasoning loop to dynamically analyze charts, adjust stop losses, and manage positions under strict risk governance.
     *   **Deterministic SMC Baseline ([scripts/run_baseline.py](scripts/run_baseline.py))**: A pure rule-based trading program that scans market structures to identify Order Blocks (OB), Fair Value Gaps (FVG), Breaks of Structure (BOS/CHoCH), and Liquidity Sweeps.
     *   **Risk-Managed Deterministic Baseline (RMDB) ([scripts/run_rmdb.py](scripts/run_rmdb.py))**: A hybrid control model combining the Baseline's deterministic SMC entry rules with the LLM's quantitative risk governance overlay (Volatility Zones, ATR-Gate).
+    *   **XGBoost ML Baseline ([xgboost_baseline.py](xgboost_baseline.py))**: A supervised machine learning baseline utilizing walk-forward classification on tabular price and technical features to isolate the value added specifically by LLM reasoning.
 *   **Event-Driven AI Wakeup**: Minimizes API invocation costs by ~80% by only querying the LLM when critical events occur: daily price fluctuations $\ge 0.8\%$, RSI entering extreme zones ($<35$ or $>65$), or during active position management.
 *   **Volatility-Adaptive Risk Governance**: Categorizes market risk based on short-term/long-term Volatility Ratios ($VR$):
     *   **Green Zone ($VR < 1.6$)**: Stable market conditions; standard entry confluences applied. Risks **1.0% of Balance**.
@@ -29,23 +30,33 @@ An event-driven backtesting and live execution framework built to evaluate Large
 
 ```text
 LLM_trading_ScienceResearch/
-├── dataset/                  # Historical daily OHLCV CSV files (e.g. AAPL, gold)
-├── prompts/                  # System prompts and instructions for AI agents
-│   └── system_prompt.txt     # Default "Active Guardian" risk overlay strategy
-├── scripts/                  # Auxiliary operational scripts
-│   ├── run_baseline.py       # Rule-Based Baseline execution engine
-│   ├── run_rmdb.py           # Risk-Managed Deterministic Baseline (RMDB) engine
-│   ├── run_stats_significance.py  # Statistical significance and bootstrap suite
-│   └── recalculate_portfolio.py   # Portfolio balance recalculator from raw logs
-├── data-backtest/            # Backtest results (official run logs and local outputs)
-├── bot.py                    # Core live-trading execution engine & LLM connector
-├── backtest.py               # Historical timeline simulation harness for LLM
-├── dashboard.py              # Streamlit monitoring dashboard
-├── LogicAI.md                # Technical document: AI decision framework details
-├── logicbaseline.md          # Technical document: SMC rule-based logic details
-├── logicrmdb.md              # Technical document: Hybrid RMDB logic details
-├── requirements.txt          # Python library dependencies
-└── .env.example              # Environment configuration template
+├── dataset/                      # Historical daily OHLCV CSV files (e.g. AAPL, GOLD)
+├── prompts/                      # System prompts and instructions for AI agents
+│   ├── system_prompt.txt         # Default "Active Guardian" risk overlay strategy
+│   ├── system_prompt_aggressive.txt # Aggressive prompt strategy
+│   └── system_prompt_sniper.txt     # Sniper/Conservative entry prompt strategy
+├── scripts/                      # Auxiliary operational scripts
+│   ├── run_baseline.py           # Rule-Based Baseline execution engine
+│   ├── run_rmdb.py               # Risk-Managed Deterministic Baseline (RMDB) engine
+│   ├── run_stats_significance.py # Statistical significance and bootstrap suite
+│   ├── recalculate_portfolio.py  # Portfolio balance recalculator from raw logs
+│   ├── manual_hyperliquid_smoke.py # Interactive Hyperliquid API test script
+│   └── run_backtest_docker.sh    # Docker orchestration runner script
+├── data-backtest/                # Backtest results (official run logs and local outputs)
+├── results/                      # Consolidated evaluation tables for DSAA 2026 paper
+│   ├── table2_combined.csv       # Consolidated performance averages across scenarios
+│   └── xgboost/                  # XGBoost run metrics, trade diagnostics, and return paths
+├── bot.py                        # Core live-trading execution engine & LLM connector
+├── backtest.py                   # Historical timeline simulation harness for LLM
+├── xgboost_baseline.py           # Walk-forward supervised ML baseline execution engine
+├── dashboard.py                  # Streamlit monitoring dashboard
+├── LogicAI.md                    # Technical document: AI decision framework details
+├── logicbaseline.md              # Technical document: SMC rule-based logic details
+├── logicrmdb.md                  # Technical document: Hybrid RMDB logic details
+├── logicXGBoost.md               # Technical document: Walk-forward ML baseline details
+├── Dockerfile                    # Containerization specification for backtests
+├── requirements.txt              # Python library dependencies
+└── .env.example                  # Environment configuration template
 ```
 
 ---
@@ -90,14 +101,21 @@ Simulate the hybrid RMDB model combining rule-based entry with volatility-based 
 python scripts/run_rmdb.py
 ```
 
-### 4. Evaluate Statistical Significance
+### 4. Run XGBoost ML Baseline
+Train the walk-forward classification model and simulate the 18 backtest configurations (2 assets x 3 periods x 3 slippage scenarios) to rebuild the ML benchmark results:
+```bash
+python xgboost_baseline.py
+```
+This updates the performance CSV summaries and return path tracks under the `results/` folder.
+
+### 5. Evaluate Statistical Significance
 Compare the AI agent's performance directly against the baselines to run Welch's t-test, Mann-Whitney U, and bootstrap intervals:
 ```bash
 python scripts/run_stats_significance.py --agent data-backtest/YOUR_AGENT_RUN_ID --baseline data-backtest/YOUR_BASELINE_RUN_ID
 ```
 This generates a detailed comparison report: `data-backtest/statistical_significance_report.md`.
 
-### 5. Launch Live Dashboard
+### 6. Launch Live Dashboard
 Launch the dashboard to monitor active paper or live trades:
 ```bash
 streamlit run dashboard.py
@@ -110,6 +128,7 @@ streamlit run dashboard.py
 *   For an in-depth look at prompt design, volatility boundaries, and risk governance logic of the LLM Bot: See [LogicAI.md](LogicAI.md).
 *   For technical implementation details of the technical indicators and SMC logic of the Baseline Bot: See [logicbaseline.md](logicbaseline.md).
 *   For details of the hybrid Volatility Zones and SMC criteria combination of the RMDB Bot: See [logicrmdb.md](logicrmdb.md).
+*   For details on feature engineering, target labeling, walk-forward training schema, and hyperparameters of the XGBoost baseline bot: See [logicXGBoost.md](logicXGBoost.md).
 
 ---
 
@@ -119,4 +138,4 @@ This codebase serves as the replication package for the manuscript:
 **"Can Large Language Models Trade under Market Stress? Evidence from AAPL and XAUUSD Backtesting across Crisis Regimes"**
 *Prepared for submission to IEEE DSAA 2026 — Application, Data and Benchmark Track*
 
-For peer reviewers, the raw execution logs, exact prompt logs (`ai_messages.csv`), trade history, and portfolio states evaluated in the paper are preserved under `data-backtest/`.
+For peer reviewers, the raw execution logs, exact prompt logs (`ai_messages.csv`), trade history, and portfolio states evaluated in the paper are preserved under `data-backtest/`. Comparative results across the four systems (Baseline, RMDB, XGBoost, and LLM Agent) are collected under `results/`.
