@@ -1,0 +1,20 @@
++------------------+-----------------------------------+
+| Metric           | Value                             |
++------------------+-----------------------------------+
+| Model            | meta-llama/llama-3.3-70b-instruct |
+| Asset            | GOLD                              |
+| Crisis Period    | 2008-01-01 to 2009-12-31          |
+| Initial Capital  | $1,000.00                         |
+| Final Capital    | $981.56                           |
+| Net Profit       | -$18.44                           |
+| Return %         | -1.84%                            |
+| Total Trades     | 119                               |
+| Win Rate         | 37.0%                             |
+| Profit Factor    | 0.98                              |
+| Sharpe Ratio     | -0.15                             |
+| Sortino Ratio    | -0.20                             |
+| Maximum Drawdown | 7.34%                             |
+| Recovery Factor  | -0.25                             |
+| VaR/CVaR (95%)   | 0.55% / 0.90%                     |
+| Avg Holding Time | 3.2d                              |
++------------------+-----------------------------------+

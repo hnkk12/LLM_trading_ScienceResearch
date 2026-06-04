@@ -1,0 +1,20 @@
++------------------+-----------------------------------+
+| Metric           | Value                             |
++------------------+-----------------------------------+
+| Model            | meta-llama/llama-3.3-70b-instruct |
+| Asset            | GOLD                              |
+| Crisis Period    | 2020-01-01 to 2021-12-31          |
+| Initial Capital  | $1,000.00                         |
+| Final Capital    | $867.47                           |
+| Net Profit       | -$132.53                          |
+| Return %         | -13.25%                           |
+| Total Trades     | 51                                |
+| Win Rate         | 25.5%                             |
+| Profit Factor    | 0.44                              |
+| Sharpe Ratio     | -1.96                             |
+| Sortino Ratio    | -2.33                             |
+| Maximum Drawdown | 14.44%                            |
+| Recovery Factor  | -0.92                             |
+| VaR/CVaR (95%)   | 0.24% / 0.73%                     |
+| Avg Holding Time | 3.1d                              |
++------------------+-----------------------------------+

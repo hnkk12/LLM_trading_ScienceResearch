@@ -1,0 +1,20 @@
++------------------+------------------+
+| Metric           | Value            |
++------------------+------------------+
+| Model            | XGBoost Baseline |
+| Asset            | Gold             |
+| Crisis Period    | 2008-2009 (S0)   |
+| Initial Capital  | $1,000.00        |
+| Final Capital    | $910.58          |
+| Net Profit       | -$89.42          |
+| Return %         | -8.94%           |
+| Total Trades     | 87               |
+| Win Rate         | 40.2%            |
+| Profit Factor    | 0.57             |
+| Sharpe Ratio     | -1.29            |
+| Sortino Ratio    | -1.64            |
+| Maximum Drawdown | 10.82%           |
+| Recovery Factor  | -0.83            |
+| VaR/CVaR (95%)   | 0.00% / 0.00%    |
+| Avg Holding Time | 4.2d             |
++------------------+------------------+

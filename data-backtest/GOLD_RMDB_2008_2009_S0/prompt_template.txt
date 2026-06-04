@@ -1,0 +1,1 @@
+Risk-Managed Deterministic Baseline (RMDB). No LLM used. 1% Risk, Green/Yellow/Red Zones, ATR Gate.

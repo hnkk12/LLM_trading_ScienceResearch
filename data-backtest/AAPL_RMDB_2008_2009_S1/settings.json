@@ -1,0 +1,16 @@
+{
+  "start": "2008-01-01T00:00:00+00:00",
+  "end": "2009-12-31T00:00:00+00:00",
+  "interval": "1d",
+  "symbols": [
+    "AAPL"
+  ],
+  "start_capital": 1000.0,
+  "model": "Risk-Managed Deterministic Baseline",
+  "temperature": 0.0,
+  "max_tokens": 0,
+  "slippage_mode": "S1",
+  "spread_pct": 0.0002,
+  "fee_rate_taker": 0.000275,
+  "fee_rate_maker": 0.0
+}

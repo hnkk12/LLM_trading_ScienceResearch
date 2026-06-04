@@ -1,0 +1,4 @@
+system,scenario,trades_per_run,win_rate,avg_hold_days
+XGBoost,S0,81.83,45.9,3.78
+XGBoost,S1,81.17,56.78,3.81
+XGBoost,S2,81.5,53.51,3.8

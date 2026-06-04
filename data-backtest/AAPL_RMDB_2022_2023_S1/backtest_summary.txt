@@ -1,0 +1,20 @@
++------------------+--------------------------+
+| Metric           | Value                    |
++------------------+--------------------------+
+| Model            | RMDB                     |
+| Asset            | AAPL                     |
+| Crisis Period    | 2022-01-01 to 2023-12-31 |
+| Initial Capital  | $1,000.00                |
+| Final Capital    | $943.46                  |
+| Net Profit       | -$56.54                  |
+| Return %         | -5.65%                   |
+| Total Trades     | 41                       |
+| Win Rate         | 34.1%                    |
+| Profit Factor    | 0.81                     |
+| Sharpe Ratio     | -0.54                    |
+| Sortino Ratio    | -0.76                    |
+| Maximum Drawdown | 7.64%                    |
+| Recovery Factor  | -0.74                    |
+| VaR/CVaR (95%)   | 0.55% / 0.86%            |
+| Avg Holding Time | 7.2d                     |
++------------------+--------------------------+

@@ -1,0 +1,20 @@
++------------------+--------------------------+
+| Metric           | Value                    |
++------------------+--------------------------+
+| Model            | RMDB                     |
+| Asset            | GOLD                     |
+| Crisis Period    | 2020-01-01 to 2021-12-31 |
+| Initial Capital  | $1,000.00                |
+| Final Capital    | $922.85                  |
+| Net Profit       | -$77.15                  |
+| Return %         | -7.72%                   |
+| Total Trades     | 38                       |
+| Win Rate         | 28.9%                    |
+| Profit Factor    | 0.74                     |
+| Sharpe Ratio     | -0.64                    |
+| Sortino Ratio    | -0.91                    |
+| Maximum Drawdown | 10.99%                   |
+| Recovery Factor  | -0.70                    |
+| VaR/CVaR (95%)   | 0.47% / 0.99%            |
+| Avg Holding Time | 9.5d                     |
++------------------+--------------------------+

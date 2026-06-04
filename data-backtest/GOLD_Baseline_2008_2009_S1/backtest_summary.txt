@@ -1,0 +1,20 @@
++------------------+--------------------------+
+| Metric           | Value                    |
++------------------+--------------------------+
+| Model            | Rule-Based Baseline      |
+| Asset            | GOLD                     |
+| Crisis Period    | 2008-01-01 to 2009-12-31 |
+| Initial Capital  | $1,000.00                |
+| Final Capital    | $941.14                  |
+| Net Profit       | -$58.86                  |
+| Return %         | -5.89%                   |
+| Total Trades     | 39                       |
+| Win Rate         | 33.3%                    |
+| Profit Factor    | 0.79                     |
+| Sharpe Ratio     | -0.65                    |
+| Sortino Ratio    | -0.87                    |
+| Maximum Drawdown | 16.44%                   |
+| Recovery Factor  | -0.36                    |
+| VaR/CVaR (95%)   | 0.50% / 0.82%            |
+| Avg Holding Time | 7.9d                     |
++------------------+--------------------------+
