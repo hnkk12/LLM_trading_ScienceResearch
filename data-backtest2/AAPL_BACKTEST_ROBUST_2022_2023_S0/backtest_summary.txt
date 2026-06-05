@@ -1,0 +1,20 @@
++------------------+-----------------------------------+
+| Metric           | Value                             |
++------------------+-----------------------------------+
+| Model            | meta-llama/llama-3.3-70b-instruct |
+| Asset            | AAPL                              |
+| Crisis Period    | 2022-01-01 to 2023-12-31          |
+| Initial Capital  | $1,000.00                         |
+| Final Capital    | $964.01                           |
+| Net Profit       | -$35.99                           |
+| Return %         | -3.60%                            |
+| Total Trades     | 7                                 |
+| Win Rate         | 0.0%                              |
+| Profit Factor    | 0.00                              |
+| Sharpe Ratio     | -2.14                             |
+| Sortino Ratio    | -2.13                             |
+| Maximum Drawdown | 3.60%                             |
+| Recovery Factor  | -1.00                             |
+| VaR/CVaR (95%)   | 0.00% / 0.01%                     |
+| Avg Holding Time | 1.3d                              |
++------------------+-----------------------------------+

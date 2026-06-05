@@ -1,0 +1,20 @@
++------------------+-----------------------------------+
+| Metric           | Value                             |
++------------------+-----------------------------------+
+| Model            | meta-llama/llama-3.3-70b-instruct |
+| Asset            | AAPL                              |
+| Crisis Period    | 2008-01-01 to 2009-12-31          |
+| Initial Capital  | $1,000.00                         |
+| Final Capital    | $880.23                           |
+| Net Profit       | -$119.77                          |
+| Return %         | -11.98%                           |
+| Total Trades     | 44                                |
+| Win Rate         | 18.2%                             |
+| Profit Factor    | 0.30                              |
+| Sharpe Ratio     | -2.07                             |
+| Sortino Ratio    | -2.35                             |
+| Maximum Drawdown | 13.00%                            |
+| Recovery Factor  | -0.92                             |
+| VaR/CVaR (95%)   | 0.19% / 0.59%                     |
+| Avg Holding Time | 4.0d                              |
++------------------+-----------------------------------+
