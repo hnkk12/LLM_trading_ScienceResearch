@@ -14,6 +14,8 @@ import numpy as np
 import pandas as pd
 from xgboost import XGBClassifier
 import ta
+import shap
+import matplotlib.pyplot as plt
 
 warnings.filterwarnings("ignore")
 
@@ -389,6 +391,10 @@ def run_all():
 
     aggregate_rows = []
     trade_diag_rows = []
+    
+    all_feature_importances = []
+    all_X_test = []
+    all_shap_values = []
 
     for asset_name, data_path in ASSETS.items():
         if not data_path.exists():
@@ -438,6 +444,19 @@ def run_all():
 
             # Predictions
             probas = model.predict_proba(X_test)[:, 1]
+
+            # Collect feature importances
+            all_feature_importances.append(model.feature_importances_)
+
+            # Compute and collect SHAP values
+            explainer = shap.TreeExplainer(model)
+            shap_vals = explainer.shap_values(X_test)
+            if isinstance(shap_vals, list):
+                shap_vals = shap_vals[1] if len(shap_vals) > 1 else shap_vals[0]
+            elif len(shap_vals.shape) == 3:
+                shap_vals = shap_vals[:, :, 1]
+            all_shap_values.append(shap_vals)
+            all_X_test.append(X_test)
 
             for scen_name, scen_cfg in SCENARIOS.items():
                 logging.info(f"  Scenario: {scen_name}")
@@ -624,6 +643,91 @@ def run_all():
     diag_summary.to_csv(OUTPUT_RESULTS_DIR / "trade_diagnostics.csv", index=False)
     logging.info(f"Saved trade diagnostics -> {OUTPUT_RESULTS_DIR}/trade_diagnostics.csv")
 
+    # ─── FEATURE IMPORTANCE & SHAP AGGREGATION ───
+    if all_feature_importances:
+        # 1. Feature Importance aggregation
+        importances_df = pd.DataFrame(all_feature_importances, columns=FEATURE_COLS)
+        mean_importances = importances_df.mean()
+        
+        # Map to groups
+        feature_to_group = {
+            "rsi_14": "RSI",
+            "macd": "MACD",
+            "macd_signal": "MACD",
+            "macd_hist": "MACD",
+            "ema_20": "EMA",
+            "ema_50": "EMA",
+            "atr_14": "ATR",
+            "volume_ratio": "volume ratio",
+            "close_pct_1d": "returns",
+            "close_pct_5d": "returns",
+            "close_pct_20d": "returns",
+            "vol_gate_flag": "volatility gate"
+        }
+        
+        fi_rows = []
+        for feat in FEATURE_COLS:
+            fi_rows.append({
+                "Feature": feat,
+                "Group": feature_to_group[feat],
+                "Importance": mean_importances[feat]
+            })
+        fi_df = pd.DataFrame(fi_rows)
+        fi_df = fi_df.sort_values(by="Importance", ascending=False).reset_index(drop=True)
+        fi_df.to_csv(OUTPUT_RESULTS_DIR / "xgboost_feature_importance.csv", index=False)
+        logging.info(f"Saved feature importance -> {OUTPUT_RESULTS_DIR}/xgboost_feature_importance.csv")
+        
+        # 2. SHAP aggregation
+        X_test_all = pd.concat(all_X_test, axis=0).reset_index(drop=True)
+        shap_vals_all = np.concatenate(all_shap_values, axis=0)
+        
+        mean_abs_shap = np.mean(np.abs(shap_vals_all), axis=0)
+        shap_rows = []
+        for i, feat in enumerate(FEATURE_COLS):
+            shap_rows.append({
+                "Feature": feat,
+                "Group": feature_to_group[feat],
+                "Mean_Abs_SHAP": mean_abs_shap[i]
+            })
+        shap_df = pd.DataFrame(shap_rows)
+        shap_df = shap_df.sort_values(by="Mean_Abs_SHAP", ascending=False).reset_index(drop=True)
+        shap_df.to_csv(OUTPUT_RESULTS_DIR / "shap_summary.csv", index=False)
+        logging.info(f"Saved SHAP summary -> {OUTPUT_RESULTS_DIR}/shap_summary.csv")
+        
+        # 3. Plot Feature Importance and SHAP
+        try:
+            # Individual Feature Importance Plot
+            plt.figure(figsize=(10, 6))
+            sorted_fi = fi_df.sort_values(by="Importance", ascending=True)
+            plt.barh(sorted_fi["Feature"], sorted_fi["Importance"], color="skyblue")
+            plt.title("XGBoost Average Feature Importance (Gain)", fontsize=14, fontweight="bold")
+            plt.xlabel("Relative Importance (Gain)")
+            plt.tight_layout()
+            plt.savefig(OUTPUT_RESULTS_DIR / "xgboost_feature_importance.png", dpi=300)
+            plt.close()
+            
+            # Group Importance Plot
+            group_fi = fi_df.groupby("Group")["Importance"].sum().reset_index()
+            group_fi = group_fi.sort_values(by="Importance", ascending=True)
+            plt.figure(figsize=(10, 6))
+            plt.barh(group_fi["Group"], group_fi["Importance"], color="coral")
+            plt.title("XGBoost Average Feature Importance by Group", fontsize=14, fontweight="bold")
+            plt.xlabel("Total Group Importance")
+            plt.tight_layout()
+            plt.savefig(OUTPUT_RESULTS_DIR / "xgboost_group_importance.png", dpi=300)
+            plt.close()
+            
+            # SHAP Summary Beeswarm Plot
+            plt.figure(figsize=(10, 6))
+            shap.summary_plot(shap_vals_all, X_test_all, show=False)
+            plt.title("SHAP Summary Beeswarm Plot (All Assets & Periods)", fontsize=14, fontweight="bold")
+            plt.tight_layout()
+            plt.savefig(OUTPUT_RESULTS_DIR / "shap_summary.png", dpi=300)
+            plt.close()
+            logging.info("Saved feature importance and SHAP plots.")
+        except Exception as e:
+            logging.warning(f"Failed to generate plots: {e}")
+
     # ─── MDD ADVANTAGE COUNTS GENERATION ───
     # Parse existing runs from data-backtest directory to generate comparison counts
     generate_mdd_advantage_counts(agg_df)
@@ -656,6 +760,8 @@ def generate_mdd_advantage_counts(xgb_agg_df: pd.DataFrame):
             if "xgboost" in model_name.lower():
                 # We already have XGBoost from current run
                 continue
+            elif "random forest" in model_name.lower() or "rf" in model_name.lower():
+                system = "RF"
             elif "risk-managed" in model_name.lower():
                 system = "RMDB"
             elif "baseline" in model_name.lower():
@@ -721,7 +827,7 @@ def generate_mdd_advantage_counts(xgb_agg_df: pd.DataFrame):
 
     adv_rows = []
     
-    for ref_system in ["Baseline", "RMDB", "LLM"]:
+    for ref_system in ["Baseline", "RMDB", "LLM", "RF"]:
         ref_df = others_df[others_df["system"] == ref_system]
         if ref_df.empty:
             logging.warning(f"No completed runs found for system: {ref_system}. Skipping comparison.")

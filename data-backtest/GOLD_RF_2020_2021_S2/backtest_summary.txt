@@ -1,0 +1,20 @@
++------------------+------------------------+
+| Metric           | Value                  |
++------------------+------------------------+
+| Model            | Random Forest Baseline |
+| Asset            | Gold                   |
+| Crisis Period    | 2020-2021 (S2)         |
+| Initial Capital  | $1,000.00              |
+| Final Capital    | $1,020.07              |
+| Net Profit       | +$20.07                |
+| Return %         | +2.01%                 |
+| Total Trades     | 36                     |
+| Win Rate         | 44.4%                  |
+| Profit Factor    | 1.71                   |
+| Sharpe Ratio     | 0.74                   |
+| Sortino Ratio    | 0.69                   |
+| Maximum Drawdown | 0.76%                  |
+| Recovery Factor  | 2.65                   |
+| VaR/CVaR (95%)   | 0.00% / 0.00%          |
+| Avg Holding Time | 2.1d                   |
++------------------+------------------------+

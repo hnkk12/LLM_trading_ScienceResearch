@@ -1,6 +1,6 @@
 # Logic XGBoost - Supervised Machine Learning Baseline (Detailed Technical Specification)
 
-This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, and execution model of the **XGBoost Baseline Bot** (`xgboost_baseline.py`).
+This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, model interpretability framework, and execution model of the **XGBoost Baseline Bot** (`xgboost_baseline.py`).
 
 ---
 
@@ -11,8 +11,9 @@ The XGBoost Baseline Bot is a **supervised machine learning control model** desi
 ```
 Baseline (Technical Rules)
   → RMDB (Rules + Risk Gates)                  ← Isolates impact of Risk Gates
-    → XGBoost (ML Predictions + Risk Gates)     ← Isolates value of LLM Reasoning (NEW)
-      → LLM Agent (LLM Decisions + Risk Gates)
+    → Random Forest (ML Bagging + Risk Gates)   ← Isolates Bagging vs Boosting
+      → XGBoost (ML Boosting + Risk Gates)      ← Isolates value of LLM Reasoning (NEW)
+        → LLM Agent (LLM Decisions + Risk Gates)
 ```
 
 ### Core Architecture:
@@ -20,6 +21,7 @@ Baseline (Technical Rules)
 2.  **Walk-Forward Classifier**: Fits an XGBoost binary classifier on pre-stress historical windows and predicts next-day price direction.
 3.  **Risk Management overlay**: Applies the exact same 1% risk-per-trade position sizing, dynamic stop-loss, and ATR-based volatility gate as the RMDB and LLM bots.
 4.  **Transaction Fees & Slippage**: Incorporates a taker fee of **0.05%** per transaction, a bid-ask spread of **0.02%**, and execution price slippage models (S0, S1, S2).
+5.  **Interpretability Engine**: Extracts feature importance (Gain) and computes SHAP (SHapley Additive exPlanations) values on out-of-sample data to explain what technical indicators drive predictions.
 
 ---
 
@@ -97,7 +99,7 @@ Once a signal is generated, it must satisfy the risk-management gates before exe
     $$\text{Risk Amount} = \text{Current Equity}_t \times 0.01$$
     $$\text{SL Distance} = 2.0 \times \text{ATR}_{14, t}$$
     $$\text{Shares} = \text{round}\left( \frac{\text{Risk Amount}}{\text{SL Distance}}, 4 \right)$$
-    *Note: Fractional sizes are allowed (up to 4 decimals) to match Hyperliquid and commodity/futures specifications for gold contracts.*
+    *Note: Fractional sizes are allowed (up to 4 decimals).*
 3.  **Capital Constraint**: Max trade value is capped at 95% of equity (leverage limits).
 4.  **Stop-Loss Placement**:
     $$\text{SL Price} = \text{Entry Price} - \text{SL Distance}$$
@@ -124,7 +126,33 @@ Once a signal is generated, it must satisfy the risk-management gates before exe
 
 ---
 
-## 7. Output Result Schema
+## 7. Model Interpretability & Explainability (SHAP)
+
+To identify what indicators drive the model's decision-making, we analyze feature importance and directional attribution.
+
+### A. Feature Grouping
+Features are categorized into 7 groups:
+1.  **RSI**: `rsi_14`
+2.  **MACD**: `macd`, `macd_signal`, `macd_hist`
+3.  **EMA**: `ema_20`, `ema_50`
+4.  **ATR**: `atr_14`
+5.  **Volume Ratio**: `volume_ratio`
+6.  **Returns**: `close_pct_1d`, `close_pct_5d`, `close_pct_20d`
+7.  **Volatility Gate**: `vol_gate_flag`
+
+### B. Gain-Based Feature Importance
+Calculated using XGBoost's built-in feature score (gain), representing the average fractional contribution of features to reduction in training log-loss.
+$$\text{Importance}_{\text{Group}} = \sum_{f \in \text{Group}} \text{Importance}(f)$$
+
+### C. SHAP (SHapley Additive exPlanations)
+Computes Shapley values using `TreeExplainer` on the out-of-sample test splits to measure the marginal contribution of each indicator value to the output log-odds prediction:
+$$\phi_j = \sum_{S \subseteq F \setminus \{j\}} \frac{|S|!(|F| - |S| - 1)!}{|F|!} \left[ f_x(S \cup \{j\}) - f_x(S) \right]$$
+*   **Global Impact**: Calculated using the mean absolute SHAP value across all test dates ($mean(|\phi_j|)$).
+*   **Directional Impact**: Disclosed using a beeswarm plot to show how higher/lower indicator values shift predictions.
+
+---
+
+## 8. Output Result Schema
 
 All XGBoost backtests generate matching results standard to the paper framework:
 *   `data-backtest/AAPL_XGBOOST_{period}_{scenario}/`
@@ -132,7 +160,13 @@ All XGBoost backtests generate matching results standard to the paper framework:
     *   `daily_returns.csv`: Daily return path.
     *   `trade_history.csv`: List of entry, exit, holding days, type of close (Stop Loss or Signal Exit) and net PnL.
     *   `backtest_summary.txt`: ASCII format metrics summary table.
-*   `results/xgboost/aggregate_performance.csv`: Summary performance rows across 18 backtest combinations.
-*   `results/xgboost/trade_diagnostics.csv`: Averages of orders count, win rate, and hold duration.
-*   `results/xgboost/mdd_advantage_counts.csv`: Maximum Drawdown advantage counts vs Baseline, RMDB, and LLM systems.
-*   `results/table2_combined.csv`: Overall summary of the 4 compared models.
+*   `results/xgboost/`
+    *   `aggregate_performance.csv`: Summary performance rows across 18 backtest combinations.
+    *   `trade_diagnostics.csv`: Averages of orders count, win rate, and hold duration.
+    *   `xgboost_feature_importance.csv`: Rank list of feature gain values.
+    *   `shap_summary.csv`: Rank list of mean absolute SHAP values.
+    *   `xgboost_feature_importance.png`: Bar plot of feature importances.
+    *   `xgboost_group_importance.png`: Bar plot of grouped features.
+    *   `shap_summary.png`: Beeswarm SHAP summary plot.
+    *   `mdd_advantage_counts.csv`: Maximum Drawdown advantage counts vs Baseline, RMDB, RF, and LLM systems.
+*   `results/table2_combined.csv`: Combined table averaging metrics across all systems.

@@ -1,0 +1,20 @@
++------------------+------------------------+
+| Metric           | Value                  |
++------------------+------------------------+
+| Model            | Random Forest Baseline |
+| Asset            | AAPL                   |
+| Crisis Period    | 2008-2009 (S2)         |
+| Initial Capital  | $1,000.00              |
+| Final Capital    | $971.52                |
+| Net Profit       | -$28.48                |
+| Return %         | -2.85%                 |
+| Total Trades     | 65                     |
+| Win Rate         | 50.8%                  |
+| Profit Factor    | 0.85                   |
+| Sharpe Ratio     | -0.35                  |
+| Sortino Ratio    | -0.38                  |
+| Maximum Drawdown | 7.12%                  |
+| Recovery Factor  | -0.40                  |
+| VaR/CVaR (95%)   | 0.00% / 0.00%          |
+| Avg Holding Time | 5.1d                   |
++------------------+------------------------+
