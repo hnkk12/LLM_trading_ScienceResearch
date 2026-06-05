@@ -15,6 +15,6 @@
 | Sortino Ratio    | -1.31            |
 | Maximum Drawdown | 12.05%           |
 | Recovery Factor  | -0.70            |
-| VaR/CVaR (95%)   | 0.00% / 0.00%    |
+| VaR/CVaR (95%)   | 0.48% / 0.64%    |
 | Avg Holding Time | 4.7d             |
 +------------------+------------------+

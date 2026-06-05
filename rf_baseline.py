@@ -461,6 +461,17 @@ def run_all():
                 res = run_backtest(df_test, probas, scen_cfg, asset_name)
                 m = calculate_metrics(res)
                 
+                # Calculate VaR and CVaR (95% Daily)
+                daily_ret_array = np.array(res["daily_returns"])
+                if len(daily_ret_array) > 0:
+                    var_95_raw = np.percentile(daily_ret_array, 5)
+                    var_95_val = -var_95_raw if var_95_raw < 0 else 0.0
+                    losses_beyond = daily_ret_array[daily_ret_array <= var_95_raw]
+                    cvar_95_val = -losses_beyond.mean() if len(losses_beyond) > 0 and losses_beyond.mean() < 0 else 0.0
+                else:
+                    var_95_val = 0.0
+                    cvar_95_val = 0.0
+                
                 logging.info(f"    Total Return={m['total_return']:+.2f}% | MDD={m['mdd']:.2f}% | Sharpe={m['sharpe']:.2f} | Trades={m['n_trades']}")
 
                 # ─── SAVE TO STANDARDIZED DATA-BACKTEST DIR ───
@@ -492,8 +503,8 @@ def run_all():
                         "win_rate_pct": m["win_rate"],
                         "sharpe_ratio": m["sharpe"],
                         "sortino_ratio": m["sortino"],
-                        "var_95_pct": 0.0,
-                        "cvar_95_pct": 0.0,
+                        "var_95_pct": var_95_val * 100,
+                        "cvar_95_pct": cvar_95_val * 100,
                         "gross_profit": round(sum(t["pnl"] for t in res["trades"] if t["pnl"] > 0), 4),
                         "gross_loss": round(abs(sum(t["pnl"] for t in res["trades"] if t["pnl"] < 0)), 4)
                     },
@@ -570,7 +581,7 @@ def run_all():
                         ("Sortino Ratio", f"{m['sortino']:.2f}"),
                         ("Maximum Drawdown", f"{m['mdd']:.2f}%"),
                         ("Recovery Factor", f"{rf_val:.2f}"),
-                        ("VaR/CVaR (95%)", "0.00% / 0.00%"),
+                        ("VaR/CVaR (95%)", f"{var_95_val*100:.2f}% / {cvar_95_val*100:.2f}%"),
                         ("Avg Holding Time", avg_holding),
                     ]
                     

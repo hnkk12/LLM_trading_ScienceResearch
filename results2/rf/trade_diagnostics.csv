@@ -1,0 +1,4 @@
+system,scenario,trades_per_run,win_rate,avg_hold_days
+RF,S0,29.0,31.6,4.08
+RF,S1,29.0,57.48,4.08
+RF,S2,29.0,55.39,4.08

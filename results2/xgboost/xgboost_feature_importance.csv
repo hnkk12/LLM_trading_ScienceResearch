@@ -1,0 +1,13 @@
+Feature,Group,Importance
+macd,MACD,0.09059399
+ema_50,EMA,0.08913854
+atr_14,ATR,0.08909107
+close_pct_5d,returns,0.088144936
+macd_signal,MACD,0.08759711
+volume_ratio,volume ratio,0.087154984
+rsi_14,RSI,0.0856637
+close_pct_1d,returns,0.08547444
+ema_20,EMA,0.085366815
+macd_hist,MACD,0.08405724
+close_pct_20d,returns,0.08385848
+vol_gate_flag,volatility gate,0.043858718

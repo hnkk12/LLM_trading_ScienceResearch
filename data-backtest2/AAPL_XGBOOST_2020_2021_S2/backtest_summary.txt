@@ -1,0 +1,20 @@
++------------------+------------------+
+| Metric           | Value            |
++------------------+------------------+
+| Model            | XGBoost Baseline |
+| Asset            | AAPL             |
+| Crisis Period    | 2020-2021 (S2)   |
+| Initial Capital  | $1,000.00        |
+| Final Capital    | $2,135.42        |
+| Net Profit       | +$1,135.42       |
+| Return %         | +113.54%         |
+| Total Trades     | 73               |
+| Win Rate         | 57.5%            |
+| Profit Factor    | 8.46             |
+| Sharpe Ratio     | 1.76             |
+| Sortino Ratio    | 10.77            |
+| Maximum Drawdown | 2.07%            |
+| Recovery Factor  | 54.85            |
+| VaR/CVaR (95%)   | 0.05% / 0.42%    |
+| Avg Holding Time | 3.7d             |
++------------------+------------------+

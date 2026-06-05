@@ -23,8 +23,8 @@
     "win_rate_pct": 43.24,
     "sharpe_ratio": -0.2055,
     "sortino_ratio": -0.1585,
-    "var_95_pct": 0.0,
-    "cvar_95_pct": 0.0,
+    "var_95_pct": 0.05971419065244407,
+    "cvar_95_pct": 0.3179330513971372,
     "gross_profit": 58.498,
     "gross_loss": 67.0534
   },
@@ -995,5 +995,5 @@
     "profit_factor": 0.8724,
     "avg_holding_time_seconds": 179712.0
   },
-  "generated_at": "2026-06-06T01:30:15.367488"
+  "generated_at": "2026-06-06T02:01:22.688255"
 }

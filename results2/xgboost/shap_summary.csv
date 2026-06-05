@@ -1,0 +1,13 @@
+Feature,Group,Mean_Abs_SHAP
+close_pct_1d,returns,0.25273982
+close_pct_5d,returns,0.1670549
+ema_50,EMA,0.16394503
+macd_hist,MACD,0.15168735
+atr_14,ATR,0.15072161
+volume_ratio,volume ratio,0.145289
+macd_signal,MACD,0.14050525
+macd,MACD,0.13592581
+rsi_14,RSI,0.1307708
+ema_20,EMA,0.11794284
+close_pct_20d,returns,0.093195334
+vol_gate_flag,volatility gate,0.006310079

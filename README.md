@@ -52,6 +52,8 @@ LLM_trading_ScienceResearch/
 ├── backtest.py                   # Historical timeline simulation harness for LLM
 ├── rf_baseline.py                # Walk-forward supervised ML baseline (Bagging)
 ├── xgboost_baseline.py           # Walk-forward supervised ML baseline (Boosting)
+├── rf2.py                        # Walk-forward robust ML baseline (Bagging)
+├── xgboost2.py                   # Walk-forward robust ML baseline (Boosting)
 ├── dashboard.py                  # Streamlit monitoring dashboard
 ├── LogicAI.md                    # Technical document: AI decision framework details
 ├── logicbaseline.md              # Technical document: SMC rule-based logic details
@@ -105,18 +107,24 @@ Simulate the hybrid RMDB model combining rule-based entry with volatility-based 
 python scripts/run_rmdb.py
 ```
 
-### 4. Run Random Forest ML Baseline
+### 4. Run Random Forest ML Baseline (Original Data)
 Train the walk-forward Random Forest bagging model across the 18 backtest configurations:
 ```bash
 python rf_baseline.py
 ```
 
-### 5. Run XGBoost ML Baseline
+### 5. Run XGBoost ML Baseline (Original Data)
 Train the walk-forward XGBoost boosting model and generate the interpretability SHAP reports:
 ```bash
 python xgboost_baseline.py
 ```
-This updates the performance CSV summaries, SHAP explainability figures, and the consolidated `results/table2_combined.csv` table.
+
+### 6. Run Robust ML Baselines (Stressed Data)
+To evaluate the models on the perturbed/scrambled robust datasets and output results to `data-backtest2/` and `results2/`:
+```bash
+python rf2.py
+python xgboost2.py
+```
 
 ### 5. Evaluate Statistical Significance
 Compare the AI agent's performance directly against the baselines to run Welch's t-test, Mann-Whitney U, and bootstrap intervals:

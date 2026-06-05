@@ -1,0 +1,20 @@
++------------------+------------------------+
+| Metric           | Value                  |
++------------------+------------------------+
+| Model            | Random Forest Baseline |
+| Asset            | Gold                   |
+| Crisis Period    | 2022-2023 (S2)         |
+| Initial Capital  | $1,000.00              |
+| Final Capital    | $1,154.03              |
+| Net Profit       | +$154.03               |
+| Return %         | +15.40%                |
+| Total Trades     | 28                     |
+| Win Rate         | 39.3%                  |
+| Profit Factor    | 4.48                   |
+| Sharpe Ratio     | 1.30                   |
+| Sortino Ratio    | 2.83                   |
+| Maximum Drawdown | 1.31%                  |
+| Recovery Factor  | 11.78                  |
+| VaR/CVaR (95%)   | 0.04% / 0.24%          |
+| Avg Holding Time | 5.8d                   |
++------------------+------------------------+

@@ -1,0 +1,4 @@
+scenario,ref,mdd_wins,ret_wins,mdd_adv
+S0,vs RF,0,5,-2.3829
+S1,vs RF,0,5,-1.7221
+S2,vs RF,0,5,-1.7763

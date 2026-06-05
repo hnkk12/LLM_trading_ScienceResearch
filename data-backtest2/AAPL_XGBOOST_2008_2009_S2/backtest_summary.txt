@@ -1,0 +1,20 @@
++------------------+------------------+
+| Metric           | Value            |
++------------------+------------------+
+| Model            | XGBoost Baseline |
+| Asset            | AAPL             |
+| Crisis Period    | 2008-2009 (S2)   |
+| Initial Capital  | $1,000.00        |
+| Final Capital    | $3,745.36        |
+| Net Profit       | +$2,745.36       |
+| Return %         | +274.54%         |
+| Total Trades     | 78               |
+| Win Rate         | 52.6%            |
+| Profit Factor    | 23.03            |
+| Sharpe Ratio     | 1.10             |
+| Sortino Ratio    | 27.90            |
+| Maximum Drawdown | 2.07%            |
+| Recovery Factor  | 132.58           |
+| VaR/CVaR (95%)   | 0.02% / 0.32%    |
+| Avg Holding Time | 3.6d             |
++------------------+------------------+

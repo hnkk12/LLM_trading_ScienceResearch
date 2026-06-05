@@ -1,0 +1,20 @@
++------------------+------------------------+
+| Metric           | Value                  |
++------------------+------------------------+
+| Model            | Random Forest Baseline |
+| Asset            | AAPL                   |
+| Crisis Period    | 2022-2023 (S1)         |
+| Initial Capital  | $1,000.00              |
+| Final Capital    | $2,157.79              |
+| Net Profit       | +$1,157.79             |
+| Return %         | +115.78%               |
+| Total Trades     | 34                     |
+| Win Rate         | 55.9%                  |
+| Profit Factor    | 50.65                  |
+| Sharpe Ratio     | 1.67                   |
+| Sortino Ratio    | 22.17                  |
+| Maximum Drawdown | 1.15%                  |
+| Recovery Factor  | 100.65                 |
+| VaR/CVaR (95%)   | 0.01% / 0.09%          |
+| Avg Holding Time | 4.6d                   |
++------------------+------------------------+
