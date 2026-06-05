@@ -1,6 +1,10 @@
 # Logic RF - Supervised Machine Learning Baseline (Detailed Technical Specification)
 
-This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, model interpretability framework, and execution model of the **Random Forest Baseline Bot** (`rf_baseline.py`).
+This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, model interpretability framework, and execution model of the **Random Forest Baseline Bot**. There are two identical implementations that differ only by their data paths:
+1. **Original Version (`rf_baseline.py`)**: Runs on the original daily market dataset (located in the `dataset/` directory) and outputs results to the `data-backtest/` directory, with summary results in `results/rf/`.
+2. **Robust/Stress-Tested Version (`rf2.py`)**: Runs on the perturbed daily market dataset (located in the `dataset_robust/` directory) and outputs results to the `data-backtest2/` directory, with summary results in `results2/rf/`.
+
+Both versions share the exact same trading logic, feature calculation, model parameters, and risk management framework.
 
 ---
 
@@ -151,18 +155,25 @@ Computes Shapley values using `TreeExplainer` on the out-of-sample test splits t
 
 ## 8. Output Result Schema
 
-All Random Forest backtests generate matching results standard to the paper framework:
-*   `data-backtest/AAPL_RF_{period}_{scenario}/`
-    *   `backtest_results.json`: Complete dictionary of metadata, daily equity series, daily returns series, capital ratios, and trade performance.
+All Random Forest backtests generate matching results standard to the paper framework, located under their respective execution folders:
+
+### A. Version 1: Original Dataset Outputs (`rf_baseline.py`)
+*   **Run Directories**: `data-backtest/AAPL_RF_{period}_{scenario}/` or `data-backtest/GOLD_RF_{period}_{scenario}/`
+    *   `backtest_results.json`: Complete dictionary of metadata, daily equity series, daily returns series, capital ratios, and trade performance (with non-zero calculated VaR/CVaR).
     *   `daily_returns.csv`: Daily return path.
-    *   `trade_history.csv`: List of entry, exit, holding days, type of close (Stop Loss or Signal Exit) and net PnL.
+    *   `trade_history.csv`: List of entry, exit, holding days, close types, and PnL.
     *   `backtest_summary.txt`: ASCII format metrics summary table.
-*   `results/rf/`
+*   **Averages & Interpretability**: `results/rf/`
     *   `aggregate_performance.csv`: Summary performance rows across 18 backtest combinations.
     *   `trade_diagnostics.csv`: Averages of orders count, win rate, and hold duration.
     *   `rf_feature_importance.csv`: Rank list of feature MDI values.
     *   `shap_summary.csv`: Rank list of mean absolute SHAP values.
-    *   `rf_feature_importance.png`: Bar plot of individual feature importances.
-    *   `rf_group_importance.png`: Bar plot of grouped features.
-    *   `shap_summary.png`: Beeswarm SHAP summary plot.
-*   `results/table2_combined.csv`: Combined table averaging metrics across all systems.
+    *   `rf_feature_importance.png` / `rf_group_importance.png` / `shap_summary.png`: Feature and SHAP beeswarm visualizations.
+*   **Consolidated Report**: `results/table2_combined.csv` (Combined averages for all 5 systems).
+
+### B. Version 2: Robust Dataset Outputs (`rf2.py`)
+*   **Run Directories**: `data-backtest2/AAPL_RF_{period}_{scenario}/` or `data-backtest2/GOLD_RF_{period}_{scenario}/`
+    *   *Note: Files inside are structured identically to Version 1.*
+*   **Averages & Interpretability**: `results2/rf/`
+    *   *Note: Diagnostic CSVs, feature importance lists, and PNG plots are saved here, representing model behavior under perturbed conditions.*
+*   **Consolidated Report**: `results2/table2_combined.csv` (Combined averages for robust ML runs).

@@ -1,6 +1,10 @@
 # Logic AI - Trading Bot (Detailed Technical Specification)
 
-This document presents the detailed architectural design, event-driven activation mechanism, input/output data structures, and trade/risk management rules of the Large Language Model (LLM) trading bot (`backtest.py` and `bot.py`).
+This document presents the detailed architectural design, event-driven activation mechanism, input/output data structures, and trade/risk management rules of the Large Language Model (LLM) trading bot. There are two identical implementations that differ only by their data paths:
+1. **Original Version (`backtest.py` & `bot.py`)**: Runs on the original daily market dataset (located in the `dataset/` directory) and outputs results to the `data-backtest/` directory.
+2. **Robust/Stress-Tested Version (`backtest2.py` & `bot.py`)**: Runs on the perturbed daily market dataset (located in the `dataset_robust/` directory) and outputs results to the `data-backtest2/` directory.
+
+Both versions utilize the same event-driven AI reasoning core, system prompts, indicators, and risk management logic.
 
 ---
 
@@ -166,3 +170,21 @@ The LLM must respond with a single, structured JSON document containing the trad
 *   **`leverage`**: Leverage multiplier (e.g., `5`, `10`).
 *   **`risk_usd`**: Dollar value at risk (must align with the 1% parameter).
 *   **`justification`**: Chain-of-thought analysis explaining the trade logic.
+
+---
+
+## 8. Output Result Schema
+
+All AI backtests generate matching results standard to the paper framework, saved under their respective run directories:
+
+### A. Version 1: Original Dataset Outputs (`backtest.py`)
+*   **Run Directories**: `data-backtest/AAPL_BACKTEST_{period}_{scenario}/` or `data-backtest/GOLD_BACKTEST_{period}_{scenario}/`
+    *   `backtest_results.json`: Complete dictionary of metadata, daily equity series, daily returns series, capital ratios, and trade performance (featuring non-zero VaR/CVaR).
+    *   `daily_returns.csv`: Daily return path.
+    *   `trade_history.csv`: List of entry, exit, holding days, close types, and net PnL.
+    *   `ai_messages.csv`: Saved transcripts of all LLM inputs and JSON outputs.
+    *   `backtest_summary.txt`: ASCII format metrics summary table.
+
+### B. Version 2: Robust Dataset Outputs (`backtest2.py`)
+*   **Run Directories**: `data-backtest2/AAPL_BACKTEST_{period}_{scenario}/` or `data-backtest2/GOLD_BACKTEST_{period}_{scenario}/`
+    *   *Note: Files inside are structured identically to Version 1, representing Llama's performance and decisions on perturbed stress-testing datasets.*

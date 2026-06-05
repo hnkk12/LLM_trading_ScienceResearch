@@ -119,11 +119,15 @@ Train the walk-forward XGBoost boosting model and generate the interpretability 
 python xgboost_baseline.py
 ```
 
-### 6. Run Robust ML Baselines (Stressed Data)
-To evaluate the models on the perturbed/scrambled robust datasets and output results to `data-backtest2/` and `results2/`:
+### 6. Run Robust ML & AI Baselines (Stressed Data)
+To evaluate the models and Llama agent on the perturbed/scrambled robust datasets and output results to `data-backtest2/` and `results2/`:
 ```bash
+# Machine Learning Baselines (RF and XGBoost)
 python rf2.py
 python xgboost2.py
+
+# LLM Agent (Llama)
+python backtest2.py
 ```
 
 ### 5. Evaluate Statistical Significance

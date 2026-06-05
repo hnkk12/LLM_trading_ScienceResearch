@@ -1,6 +1,10 @@
 # Logic XGBoost - Supervised Machine Learning Baseline (Detailed Technical Specification)
 
-This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, model interpretability framework, and execution model of the **XGBoost Baseline Bot** (`xgboost_baseline.py`).
+This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, model interpretability framework, and execution model of the **XGBoost Baseline Bot**. There are two identical implementations that differ only by their data paths:
+1. **Original Version (`xgboost_baseline.py`)**: Runs on the original daily market dataset (located in the `dataset/` directory) and outputs results to the `data-backtest/` directory, with summary results in `results/xgboost/`.
+2. **Robust/Stress-Tested Version (`xgboost2.py`)**: Runs on the perturbed daily market dataset (located in the `dataset_robust/` directory) and outputs results to the `data-backtest2/` directory, with summary results in `results2/xgboost/`.
+
+Both versions share the exact same trading logic, feature calculation, model parameters, and risk management framework.
 
 ---
 
@@ -154,19 +158,26 @@ $$\phi_j = \sum_{S \subseteq F \setminus \{j\}} \frac{|S|!(|F| - |S| - 1)!}{|F|!
 
 ## 8. Output Result Schema
 
-All XGBoost backtests generate matching results standard to the paper framework:
-*   `data-backtest/AAPL_XGBOOST_{period}_{scenario}/`
-    *   `backtest_results.json`: Complete dictionary of metadata, daily equity series, daily returns series, capital ratios, and trade performance.
+All XGBoost backtests generate matching results standard to the paper framework, located under their respective execution folders:
+
+### A. Version 1: Original Dataset Outputs (`xgboost_baseline.py`)
+*   **Run Directories**: `data-backtest/AAPL_XGBOOST_{period}_{scenario}/` or `data-backtest/GOLD_XGBOOST_{period}_{scenario}/`
+    *   `backtest_results.json`: Complete dictionary of metadata, daily equity series, daily returns series, capital ratios, and trade performance (with non-zero calculated VaR/CVaR).
     *   `daily_returns.csv`: Daily return path.
-    *   `trade_history.csv`: List of entry, exit, holding days, type of close (Stop Loss or Signal Exit) and net PnL.
+    *   `trade_history.csv`: List of entry, exit, holding days, close types, and PnL.
     *   `backtest_summary.txt`: ASCII format metrics summary table.
-*   `results/xgboost/`
+*   **Averages & Interpretability**: `results/xgboost/`
     *   `aggregate_performance.csv`: Summary performance rows across 18 backtest combinations.
     *   `trade_diagnostics.csv`: Averages of orders count, win rate, and hold duration.
     *   `xgboost_feature_importance.csv`: Rank list of feature gain values.
     *   `shap_summary.csv`: Rank list of mean absolute SHAP values.
-    *   `xgboost_feature_importance.png`: Bar plot of feature importances.
-    *   `xgboost_group_importance.png`: Bar plot of grouped features.
-    *   `shap_summary.png`: Beeswarm SHAP summary plot.
+    *   `xgboost_feature_importance.png` / `xgboost_group_importance.png` / `shap_summary.png`: Feature and SHAP beeswarm visualizations.
     *   `mdd_advantage_counts.csv`: Maximum Drawdown advantage counts vs Baseline, RMDB, RF, and LLM systems.
-*   `results/table2_combined.csv`: Combined table averaging metrics across all systems.
+*   **Consolidated Report**: `results/table2_combined.csv` (Combined averages for all 5 systems).
+
+### B. Version 2: Robust Dataset Outputs (`xgboost2.py`)
+*   **Run Directories**: `data-backtest2/AAPL_XGBOOST_{period}_{scenario}/` or `data-backtest2/GOLD_XGBOOST_{period}_{scenario}/`
+    *   *Note: Files inside are structured identically to Version 1.*
+*   **Averages & Interpretability**: `results2/xgboost/`
+    *   *Note: Diagnostic CSVs, feature importance lists, and PNG plots are saved here, representing model behavior under perturbed conditions.*
+    *   `mdd_advantage_counts.csv` / `table2_combined.csv`: Performance comparisons and consolidated averages specifically for robust ML runs.
