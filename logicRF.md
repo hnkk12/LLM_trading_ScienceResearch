@@ -1,6 +1,6 @@
 # Logic RF - Supervised Machine Learning Baseline (Detailed Technical Specification)
 
-This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, and execution model of the **Random Forest Baseline Bot** (`rf_baseline.py`).
+This document presents the detailed architectural design, feature engineering mathematics, walk-forward training windows, risk management overlays, model interpretability framework, and execution model of the **Random Forest Baseline Bot** (`rf_baseline.py`).
 
 ---
 
@@ -21,6 +21,7 @@ Baseline (Technical Rules)
 2.  **Walk-Forward Bagging Classifier**: Fits a Random Forest binary classifier on pre-stress historical windows and predicts next-day price direction.
 3.  **Risk Management overlay**: Applies the exact same 1% risk-per-trade position sizing, dynamic stop-loss, and ATR-based volatility gate as the RMDB, XGBoost, and LLM bots.
 4.  **Transaction Fees & Slippage**: Incorporates a taker fee of **0.05%** per transaction, a bid-ask spread of **0.02%**, and execution price slippage models (S0, S1, S2).
+5.  **Interpretability Engine**: Extracts feature importance (MDI) and computes SHAP (SHapley Additive exPlanations) values on out-of-sample data to explain what technical indicators drive predictions.
 
 ---
 
@@ -83,7 +84,7 @@ The Random Forest parameters are constrained to prevent overfitting on financial
 
 ### Signal Threshold:
 A long position entry is triggered **only if** the model prediction probability exceeds $55\%$:
-$$\text{Signal}_t = \begin{cases} 1 \text{ (Long)} & \text{if } P(\text{Price rises}) > 0.55 \\ 0 \text{ (Flat)} & \text{otherwise} \end{cases}$$
+$$\text{Signal}_t = \begin{cases} 1 \text (Long) & \text{if } P(\text{Price rises}) > 0.55 \\ 0 \text (Flat) & \text{otherwise} \end{cases}$$
 
 ---
 
@@ -123,7 +124,32 @@ Once a signal is generated, it must satisfy the risk-management gates before exe
 
 ---
 
-## 7. Output Result Schema
+## 7. Model Interpretability & Explainability (SHAP)
+
+To identify what indicators drive the Random Forest's decision-making, we analyze feature importance and directional attribution.
+
+### A. Feature Grouping
+Features are categorized into 7 groups:
+1.  **RSI**: `rsi_14`
+2.  **MACD**: `macd`, `macd_signal`, `macd_hist`
+3.  **EMA**: `ema_20`, `ema_50`
+4.  **ATR**: `atr_14`
+5.  **Volume Ratio**: `volume_ratio`
+6.  **Returns**: `close_pct_1d`, `close_pct_5d`, `close_pct_20d`
+7.  **Volatility Gate**: `vol_gate_flag`
+
+### B. MDI-Based Feature Importance
+Calculated using Mean Decrease in Impurity (MDI) or Gini importance, representing the fraction of total impurity reduction achieved by splitting on a feature, averaged over all 200 estimators.
+$$\text{Importance}_{\text{Group}} = \sum_{f \in \text{Group}} \text{Importance}(f)$$
+
+### C. SHAP (SHapley Additive exPlanations)
+Computes Shapley values using `TreeExplainer` on the out-of-sample test splits to measure the marginal contribution of each indicator value to the output log-odds prediction.
+*   **Global Impact**: Calculated using the mean absolute SHAP value across all test dates ($mean(|\phi_j|)$).
+*   **Variance Dampening**: Because Random Forest relies on Bagging (averaging independent tree predictions), its SHAP values are compressed by a factor of ~10 compared to XGBoost, indicating high robustness and stability of predictions.
+
+---
+
+## 8. Output Result Schema
 
 All Random Forest backtests generate matching results standard to the paper framework:
 *   `data-backtest/AAPL_RF_{period}_{scenario}/`
@@ -134,4 +160,9 @@ All Random Forest backtests generate matching results standard to the paper fram
 *   `results/rf/`
     *   `aggregate_performance.csv`: Summary performance rows across 18 backtest combinations.
     *   `trade_diagnostics.csv`: Averages of orders count, win rate, and hold duration.
+    *   `rf_feature_importance.csv`: Rank list of feature MDI values.
+    *   `shap_summary.csv`: Rank list of mean absolute SHAP values.
+    *   `rf_feature_importance.png`: Bar plot of individual feature importances.
+    *   `rf_group_importance.png`: Bar plot of grouped features.
+    *   `shap_summary.png`: Beeswarm SHAP summary plot.
 *   `results/table2_combined.csv`: Combined table averaging metrics across all systems.

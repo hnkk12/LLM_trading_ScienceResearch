@@ -1,16 +1,17 @@
 # LLM Multi-Asset Trading & Risk Governance Framework
 
-An event-driven backtesting and live execution framework built to evaluate Large Language Models (LLMs) as adaptive trading agents and risk governors, compared against a deterministic Smart Money Concepts (SMC) rule-based baseline, a hybrid Risk-Managed Deterministic Baseline (RMDB), and a supervised machine learning baseline (XGBoost).
+An event-driven backtesting and live execution framework built to evaluate Large Language Models (LLMs) as adaptive trading agents and risk governors, compared against a deterministic Smart Money Concepts (SMC) rule-based baseline, a hybrid Risk-Managed Deterministic Baseline (RMDB), and two supervised machine learning baselines (Random Forest and XGBoost).
 
 ---
 
 ## 🚀 Key Features
 
-*   **Four Execution Systems**:
+*   **Five Execution Systems**:
     *   **AI Agent Mode ([bot.py](bot.py) & [backtest.py](backtest.py))**: Integrates state-of-the-art LLMs (Llama, Gemini) with a structured reasoning loop to dynamically analyze charts, adjust stop losses, and manage positions under strict risk governance.
     *   **Deterministic SMC Baseline ([scripts/run_baseline.py](scripts/run_baseline.py))**: A pure rule-based trading program that scans market structures to identify Order Blocks (OB), Fair Value Gaps (FVG), Breaks of Structure (BOS/CHoCH), and Liquidity Sweeps.
     *   **Risk-Managed Deterministic Baseline (RMDB) ([scripts/run_rmdb.py](scripts/run_rmdb.py))**: A hybrid control model combining the Baseline's deterministic SMC entry rules with the LLM's quantitative risk governance overlay (Volatility Zones, ATR-Gate).
-    *   **XGBoost ML Baseline ([xgboost_baseline.py](xgboost_baseline.py))**: A supervised machine learning baseline utilizing walk-forward classification on tabular price and technical features to isolate the value added specifically by LLM reasoning.
+    *   **Random Forest ML Baseline ([rf_baseline.py](rf_baseline.py))**: A supervised machine learning baseline utilizing walk-forward bagging classification to examine ensemble performance without boosting complexity.
+    *   **XGBoost ML Baseline ([xgboost_baseline.py](xgboost_baseline.py))**: A supervised machine learning baseline utilizing walk-forward boosting classification on tabular price and technical features to isolate the value added specifically by LLM reasoning.
 *   **Event-Driven AI Wakeup**: Minimizes API invocation costs by ~80% by only querying the LLM when critical events occur: daily price fluctuations $\ge 0.8\%$, RSI entering extreme zones ($<35$ or $>65$), or during active position management.
 *   **Volatility-Adaptive Risk Governance**: Categorizes market risk based on short-term/long-term Volatility Ratios ($VR$):
     *   **Green Zone ($VR < 1.6$)**: Stable market conditions; standard entry confluences applied. Risks **1.0% of Balance**.
@@ -45,15 +46,18 @@ LLM_trading_ScienceResearch/
 ├── data-backtest/                # Backtest results (official run logs and local outputs)
 ├── results/                      # Consolidated evaluation tables for DSAA 2026 paper
 │   ├── table2_combined.csv       # Consolidated performance averages across scenarios
-│   └── xgboost/                  # XGBoost run metrics, trade diagnostics, and return paths
+│   ├── rf/                       # Random Forest metrics, trade diagnostics, and SHAP features
+│   └── xgboost/                  # XGBoost run metrics, trade diagnostics, SHAP explainability, and return paths
 ├── bot.py                        # Core live-trading execution engine & LLM connector
 ├── backtest.py                   # Historical timeline simulation harness for LLM
-├── xgboost_baseline.py           # Walk-forward supervised ML baseline execution engine
+├── rf_baseline.py                # Walk-forward supervised ML baseline (Bagging)
+├── xgboost_baseline.py           # Walk-forward supervised ML baseline (Boosting)
 ├── dashboard.py                  # Streamlit monitoring dashboard
 ├── LogicAI.md                    # Technical document: AI decision framework details
 ├── logicbaseline.md              # Technical document: SMC rule-based logic details
 ├── logicrmdb.md                  # Technical document: Hybrid RMDB logic details
-├── logicXGBoost.md               # Technical document: Walk-forward ML baseline details
+├── logicRF.md                    # Technical document: Walk-forward RF details
+├── logicXGBoost.md               # Technical document: Walk-forward XGBoost details
 ├── Dockerfile                    # Containerization specification for backtests
 ├── requirements.txt              # Python library dependencies
 └── .env.example                  # Environment configuration template
@@ -101,12 +105,18 @@ Simulate the hybrid RMDB model combining rule-based entry with volatility-based 
 python scripts/run_rmdb.py
 ```
 
-### 4. Run XGBoost ML Baseline
-Train the walk-forward classification model and simulate the 18 backtest configurations (2 assets x 3 periods x 3 slippage scenarios) to rebuild the ML benchmark results:
+### 4. Run Random Forest ML Baseline
+Train the walk-forward Random Forest bagging model across the 18 backtest configurations:
+```bash
+python rf_baseline.py
+```
+
+### 5. Run XGBoost ML Baseline
+Train the walk-forward XGBoost boosting model and generate the interpretability SHAP reports:
 ```bash
 python xgboost_baseline.py
 ```
-This updates the performance CSV summaries and return path tracks under the `results/` folder.
+This updates the performance CSV summaries, SHAP explainability figures, and the consolidated `results/table2_combined.csv` table.
 
 ### 5. Evaluate Statistical Significance
 Compare the AI agent's performance directly against the baselines to run Welch's t-test, Mann-Whitney U, and bootstrap intervals:
@@ -128,6 +138,7 @@ streamlit run dashboard.py
 *   For an in-depth look at prompt design, volatility boundaries, and risk governance logic of the LLM Bot: See [LogicAI.md](LogicAI.md).
 *   For technical implementation details of the technical indicators and SMC logic of the Baseline Bot: See [logicbaseline.md](logicbaseline.md).
 *   For details of the hybrid Volatility Zones and SMC criteria combination of the RMDB Bot: See [logicrmdb.md](logicrmdb.md).
+*   For details on feature engineering, target labeling, walk-forward training schema, and hyperparameters of the Random Forest baseline bot: See [logicRF.md](logicRF.md).
 *   For details on feature engineering, target labeling, walk-forward training schema, and hyperparameters of the XGBoost baseline bot: See [logicXGBoost.md](logicXGBoost.md).
 
 ---
@@ -138,4 +149,4 @@ This codebase serves as the replication package for the manuscript:
 **"Can Large Language Models Trade under Market Stress? Evidence from AAPL and XAUUSD Backtesting across Crisis Regimes"**
 *Prepared for submission to IEEE DSAA 2026 — Application, Data and Benchmark Track*
 
-For peer reviewers, the raw execution logs, exact prompt logs (`ai_messages.csv`), trade history, and portfolio states evaluated in the paper are preserved under `data-backtest/`. Comparative results across the four systems (Baseline, RMDB, XGBoost, and LLM Agent) are collected under `results/`.
+For peer reviewers, the raw execution logs, exact prompt logs (`ai_messages.csv`), trade history, and portfolio states evaluated in the paper are preserved under `data-backtest/`. Comparative results across the five systems (Baseline, RMDB, Random Forest, XGBoost, and LLM Agent) are collected under `results/`.
